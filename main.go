@@ -33,11 +33,11 @@ type Agent struct {
 
 func main() {
 	var (
-		grpcAddr     = flag.String("grpc-addr", "127.0.0.1:4317", "gRPC listen address for applications")
-		centralURL   = flag.String("central-url", "http://127.0.0.1:8080/v1/traces", "KubeTrace gateway endpoint")
-		bufferDir    = flag.String("buffer-dir", filepath.Join(os.TempDir(), "kubetrace-agent-spool"), "Spool directory path")
-		queueLimit   = flag.Int("queue-limit", 500, "Maximum memory queue items")
-		diskMaxFiles = flag.Int64("disk-limit-files", 2000, "Maximum spool files on disk")
+		grpcAddr     = flag.String("grpc-addr", getEnv("GRPC_ADDR", "0.0.0.0:4317"), "gRPC listen address for applications")
+		centralURL   = flag.String("central-url", getEnv("CENTRAL_URL", "http://127.0.0.1:8080/v1/traces"), "KubeTrace gateway endpoint")
+		bufferDir    = flag.String("buffer-dir", getEnv("BUFFER_DIR", filepath.Join(os.TempDir(), "kubetrace-agent-spool")), "Spool directory path")
+		queueLimit   = flag.Int("queue-limit", getEnvInt("QUEUE_LIMIT", 500), "Maximum memory queue items")
+		diskMaxFiles = flag.Int64("disk-limit-files", int64(getEnvInt("DISK_LIMIT_FILES", 2000)), "Maximum spool files on disk")
 	)
 	flag.Parse()
 
@@ -216,3 +216,23 @@ func (a *Agent) postPayload(data []byte) (bool, error) {
 
 	return true, nil
 }
+
+func getEnv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func getEnvInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	var n int
+	if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+		return n
+	}
+	return def
+}
+
