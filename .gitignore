@@ -1,0 +1,21 @@
+# Binaries and templates
+agent
+agent-backend
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Spool directory / disk buffer files
+*.spool
+kubetrace-agent-spool/
+agent-spool/
+
+# System files
+.DS_Store
+.idea
+.vscode
