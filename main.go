@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -47,6 +48,11 @@ func main() {
 	log.Printf("Forwarding to: %s", *centralURL)
 	log.Printf("Disk spool path: %s", *bufferDir)
 
+	skipTLSVerify := os.Getenv("SKIP_TLS_VERIFY") == "true"
+	if skipTLSVerify {
+		log.Println("[agent] skipping TLS certificate verification (SKIP_TLS_VERIFY=true)")
+	}
+
 	agent := &Agent{
 		centralURL:   *centralURL,
 		memoryQueue:  make(chan *colpb.ExportTraceServiceRequest, *queueLimit),
@@ -58,6 +64,9 @@ func main() {
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
 				IdleConnTimeout:     90 * time.Second,
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: skipTLSVerify,
+				},
 			},
 		},
 	}
