@@ -27,6 +27,6 @@ USER appuser
 
 COPY --from=builder /app/agent .
 
-EXPOSE 4317
+EXPOSE 4317 4318
 
 ENTRYPOINT ["./agent"]

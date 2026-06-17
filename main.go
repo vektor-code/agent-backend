@@ -20,6 +20,7 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcev1 "go.opentelemetry.io/proto/otlp/resource/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -35,6 +36,7 @@ type Agent struct {
 func main() {
 	var (
 		grpcAddr     = flag.String("grpc-addr", getEnv("GRPC_ADDR", "0.0.0.0:4317"), "gRPC listen address for applications")
+		httpAddr     = flag.String("http-addr", getEnv("HTTP_ADDR", "0.0.0.0:4318"), "HTTP listen address for applications")
 		centralURL   = flag.String("central-url", getEnv("CENTRAL_URL", "http://127.0.0.1:8080/v1/traces"), "KubeTrace gateway endpoint")
 		bufferDir    = flag.String("buffer-dir", getEnv("BUFFER_DIR", filepath.Join(os.TempDir(), "kubetrace-agent-spool")), "Spool directory path")
 		queueLimit   = flag.Int("queue-limit", getEnvInt("QUEUE_LIMIT", 500), "Maximum memory queue items")
@@ -44,7 +46,8 @@ func main() {
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	log.Println("=== KubeTrace Host Agent ===")
-	log.Printf("Listening on: %s", *grpcAddr)
+	log.Printf("Listening on gRPC: %s", *grpcAddr)
+	log.Printf("Listening on HTTP: %s", *httpAddr)
 	log.Printf("Forwarding to: %s", *centralURL)
 	log.Printf("Disk spool path: %s", *bufferDir)
 
@@ -91,6 +94,20 @@ func main() {
 		}
 	}()
 
+	// Set up HTTP listener for OTLP/HTTP (port 4318)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/traces", agent.HandleHTTP)
+	httpServer := &http.Server{
+		Addr:    *httpAddr,
+		Handler: mux,
+	}
+
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server: %v", err)
+		}
+	}()
+
 	// Graceful shutdown on signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -98,6 +115,11 @@ func main() {
 
 	log.Println("Shutting down KubeTrace agent...")
 	grpcServer.GracefulStop()
+	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	if err := httpServer.Shutdown(ctxShutdown); err != nil {
+		log.Printf("[agent/error] HTTP server shutdown: %v", err)
+	}
 	log.Println("KubeTrace agent stopped.")
 }
 
@@ -243,5 +265,41 @@ func getEnvInt(key string, def int) int {
 		return n
 	}
 	return def
+}
+
+// HandleHTTP handles OTLP/HTTP POST requests on /v1/traces
+func (a *Agent) HandleHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var req colpb.ExportTraceServiceRequest
+	contentType := r.Header.Get("Content-Type")
+
+	if contentType == "application/json" || contentType == "application/json; charset=utf-8" {
+		if err := protojson.Unmarshal(body, &req); err != nil {
+			log.Printf("[agent/error] failed to parse JSON request: %v", err)
+			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+			return
+		}
+	} else {
+		// Default to protobuf
+		if err := proto.Unmarshal(body, &req); err != nil {
+			log.Printf("[agent/error] failed to parse Protobuf request: %v", err)
+			http.Error(w, fmt.Sprintf("Invalid protobuf: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	_, _ = a.Export(r.Context(), &req)
+
+	w.WriteHeader(http.StatusOK)
 }
 
