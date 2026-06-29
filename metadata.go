@@ -54,6 +54,16 @@ func getHostMetadata() []*commonpb.KeyValue {
 		Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "kubetrace-agent"}},
 	})
 
+	// 7. Cluster Name
+	clusterName := os.Getenv("CLUSTER_NAME")
+	if clusterName == "" {
+		clusterName = "default"
+	}
+	attrs = append(attrs, &commonpb.KeyValue{
+		Key:   "k8s.cluster.name",
+		Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: clusterName}},
+	})
+
 	return attrs
 }
 
