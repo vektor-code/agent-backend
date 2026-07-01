@@ -430,7 +430,7 @@ func detectLanguageFromPodSpec(pod *corev1.Pod) string {
 func getPodInstrumentationStatus(pod *corev1.Pod) (bool, string, string) {
 	if pod.Annotations != nil {
 		for k, v := range pod.Annotations {
-			if strings.Contains(k, "inject-") && v == "true" {
+			if strings.Contains(k, "inject-") && v != "" {
 				parts := strings.Split(k, "inject-")
 				if len(parts) == 2 {
 					return true, parts[1], fmt.Sprintf("Injected via annotation: %s=%s", k, v)
