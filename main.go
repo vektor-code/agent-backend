@@ -78,6 +78,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go agent.runForwarder(ctx)
+	go agent.runController(ctx)
 
 	// Set up gRPC listener
 	lis, err := net.Listen("tcp", *grpcAddr)
