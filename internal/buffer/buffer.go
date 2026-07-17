@@ -1,4 +1,4 @@
-package main
+package buffer
 
 import (
 	"fmt"
@@ -19,9 +19,9 @@ type DiskBuffer struct {
 	mu          sync.Mutex
 }
 
-func NewDiskBuffer(dir string, maxFiles int64) *DiskBuffer {
+func New(dir string, maxFiles int64) *DiskBuffer {
 	_ = os.MkdirAll(dir, 0755)
-	
+
 	// Scan directory to initialize fileCounter based on existing files
 	var count int64 = 0
 	files, err := os.ReadDir(dir)
@@ -54,7 +54,7 @@ func (db *DiskBuffer) Spool(req *colpb.ExportTraceServiceRequest) error {
 
 	id := atomic.AddInt64(&db.fileCounter, 1)
 	filename := filepath.Join(db.dir, fmt.Sprintf("%d_%d.spool", time.Now().UnixNano(), id))
-	
+
 	err = os.WriteFile(filename, data, 0644)
 	if err != nil {
 		return fmt.Errorf("write spool file: %w", err)

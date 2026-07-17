@@ -1,6 +1,6 @@
 # Binaries and templates
-agent
-agent-backend
+/agent
+/agent-backend
 *.exe
 *.exe~
 *.dll

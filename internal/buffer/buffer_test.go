@@ -1,4 +1,4 @@
-package main
+package buffer
 
 import (
 	"os"
@@ -16,7 +16,7 @@ func TestDiskBuffer_SpoolAndPop(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	db := NewDiskBuffer(tempDir, 5)
+	db := New(tempDir, 5)
 
 	// Verify buffer starts empty
 	if db.Size() != 0 {
@@ -81,7 +81,7 @@ func TestDiskBuffer_Limit(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	// Set limit to 2 files
-	db := NewDiskBuffer(tempDir, 2)
+	db := New(tempDir, 2)
 
 	req := &colpb.ExportTraceServiceRequest{}
 
