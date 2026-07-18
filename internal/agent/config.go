@@ -8,7 +8,10 @@ import (
 	"path/filepath"
 )
 
-const defaultForwarderWorkers = 8
+const (
+	defaultForwarderWorkers = 8
+	defaultHTTPMaxBodyMB    = 20
+)
 
 type Config struct {
 	GRPCAddr         string
@@ -19,6 +22,7 @@ type Config struct {
 	DiskMaxFiles     int64
 	SkipTLSVerify    bool
 	ForwarderWorkers int
+	HTTPMaxBodyBytes int64
 }
 
 func ParseConfig() Config {
@@ -29,7 +33,21 @@ func ParseConfig() Config {
 	queueLimit := flag.Int("queue-limit", getEnvInt("QUEUE_LIMIT", 10000), "Maximum memory queue items")
 	diskMaxFiles := flag.Int64("disk-limit-files", int64(getEnvInt("DISK_LIMIT_FILES", 2000)), "Maximum spool files on disk")
 	forwarderWorkers := flag.Int("forwarder-workers", getEnvInt("FORWARDER_WORKERS", defaultForwarderWorkers), "Number of parallel forwarding workers")
+	httpMaxBodyMB := flag.Int("http-max-body-mb", getEnvInt("HTTP_MAX_BODY_MB", defaultHTTPMaxBodyMB), "Maximum OTLP HTTP request body size in MiB")
 	flag.Parse()
+
+	if *queueLimit <= 0 {
+		*queueLimit = 10000
+	}
+	if *diskMaxFiles <= 0 {
+		*diskMaxFiles = 2000
+	}
+	if *forwarderWorkers <= 0 {
+		*forwarderWorkers = defaultForwarderWorkers
+	}
+	if *httpMaxBodyMB <= 0 {
+		*httpMaxBodyMB = defaultHTTPMaxBodyMB
+	}
 
 	return Config{
 		GRPCAddr:         *grpcAddr,
@@ -40,6 +58,7 @@ func ParseConfig() Config {
 		DiskMaxFiles:     *diskMaxFiles,
 		SkipTLSVerify:    os.Getenv("SKIP_TLS_VERIFY") == "true",
 		ForwarderWorkers: *forwarderWorkers,
+		HTTPMaxBodyBytes: int64(*httpMaxBodyMB) << 20,
 	}
 }
 

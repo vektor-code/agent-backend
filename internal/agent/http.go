@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	colpb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -17,8 +18,15 @@ func (a *Agent) HandleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if a.maxHTTPBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, a.maxHTTPBodyBytes)
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if strings.Contains(err.Error(), "request body too large") {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return
 	}

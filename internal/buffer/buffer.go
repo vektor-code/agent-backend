@@ -16,6 +16,7 @@ type DiskBuffer struct {
 	dir         string
 	maxFiles    int64
 	fileCounter int64
+	fileCount   int64
 	mu          sync.Mutex
 }
 
@@ -33,6 +34,7 @@ func New(dir string, maxFiles int64) *DiskBuffer {
 		dir:         dir,
 		maxFiles:    maxFiles,
 		fileCounter: count,
+		fileCount:   count,
 	}
 }
 
@@ -42,8 +44,7 @@ func (db *DiskBuffer) Spool(req *colpb.ExportTraceServiceRequest) error {
 	defer db.mu.Unlock()
 
 	// Guard against infinite disk consumption
-	files, err := os.ReadDir(db.dir)
-	if err == nil && int64(len(files)) >= db.maxFiles {
+	if db.maxFiles > 0 && atomic.LoadInt64(&db.fileCount) >= db.maxFiles {
 		return fmt.Errorf("disk spool buffer is full (max files: %d)", db.maxFiles)
 	}
 
@@ -59,6 +60,7 @@ func (db *DiskBuffer) Spool(req *colpb.ExportTraceServiceRequest) error {
 	if err != nil {
 		return fmt.Errorf("write spool file: %w", err)
 	}
+	atomic.AddInt64(&db.fileCount, 1)
 
 	return nil
 }
@@ -86,7 +88,9 @@ func (db *DiskBuffer) PopNext() (*colpb.ExportTraceServiceRequest, string, error
 	var req colpb.ExportTraceServiceRequest
 	if err := proto.Unmarshal(data, &req); err != nil {
 		// Corrupted spool file, remove it to prevent deadlock
-		_ = os.Remove(path)
+		if err := os.Remove(path); err == nil {
+			atomic.AddInt64(&db.fileCount, -1)
+		}
 		return nil, "", fmt.Errorf("unmarshal spool protobuf: %w", err)
 	}
 
@@ -96,15 +100,15 @@ func (db *DiskBuffer) PopNext() (*colpb.ExportTraceServiceRequest, string, error
 func (db *DiskBuffer) Remove(path string) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	_ = os.Remove(path)
+	if err := os.Remove(path); err == nil {
+		atomic.AddInt64(&db.fileCount, -1)
+	}
 }
 
 func (db *DiskBuffer) Size() int {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	files, err := os.ReadDir(db.dir)
-	if err != nil {
+	n := atomic.LoadInt64(&db.fileCount)
+	if n < 0 {
 		return 0
 	}
-	return len(files)
+	return int(n)
 }
