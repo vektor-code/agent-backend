@@ -9,9 +9,14 @@ import (
 	"time"
 
 	agent "github.com/kubetrace/agent-backend/internal/agent"
+	"github.com/kubetrace/agent-backend/internal/vaultenv"
 )
 
 func main() {
+	if err := vaultenv.Load(); err != nil {
+		log.Printf("[warn] vault: %v (continuing with process env)", err)
+	}
+
 	cfg := agent.ParseConfig()
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	cfg.Log()
