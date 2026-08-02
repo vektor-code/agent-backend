@@ -17,9 +17,21 @@ func currentClusterName() string {
 	return "default"
 }
 
+// currentAgentNamespace resolves the namespace the agent is running in, so it
+// reports the correct OTLP endpoint to the platform. It never hardcodes a
+// namespace: it prefers the downward-API env, then the in-cluster ServiceAccount
+// namespace file (always present in a pod), then an explicit override.
 func currentAgentNamespace() string {
 	if namespace := os.Getenv("POD_NAMESPACE"); namespace != "" {
 		return namespace
 	}
-	return "trace-prod"
+	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if ns := strings.TrimSpace(string(b)); ns != "" {
+			return ns
+		}
+	}
+	if namespace := os.Getenv("AGENT_NAMESPACE"); namespace != "" {
+		return namespace
+	}
+	return "default"
 }

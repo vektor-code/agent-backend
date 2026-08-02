@@ -34,13 +34,14 @@ func Run(ctx context.Context, centralURL string, client *http.Client) {
 				continue
 			}
 
-			enabledMap, err := syncNamespaceConfig(client, configURL, clusterName, state.appNamespaces, state.reportedPods)
+			enabledMap, workloads, err := syncNamespaceConfig(client, configURL, clusterName, state.appNamespaces, state.reportedPods, state.reportedNodes)
 			if err != nil {
 				log.Printf("[controller] error syncing configurations: %v", err)
 				continue
 			}
 
 			reconcileInstrumentations(ctx, clients.dynamic, state.appNamespaces, enabledMap)
+			reconcileWorkloadInstrumentation(ctx, clients.kube, workloads)
 		}
 	}
 }

@@ -1,33 +1,103 @@
 package controller
 
 import (
+	"os"
 	"strings"
+	"sync"
 
+	"github.com/kubetrace/shared/connstr"
 	corev1 "k8s.io/api/core/v1"
 )
 
-func detectDatabaseInfo(pod *corev1.Pod, configMaps map[string]map[string]string) (dbName, dbHost, dbPort string) {
-	envs := podEnvMap(pod, configMaps)
-	dbHost = firstEnvValue(envs, "DB_HOST", "POSTGRES_HOST", "MYSQL_HOST", "DATABASE_HOST", "DB_HOST_DEV", "DB_HOST_UAT")
-	dbPort = firstEnvValue(envs, "DB_PORT", "POSTGRES_PORT", "MYSQL_PORT", "DATABASE_PORT", "DB_PORT_DEV", "DB_PORT_UAT")
-	dbName = firstEnvValue(envs, "DB_NAME", "POSTGRES_DB", "MYSQL_DATABASE", "DB_DATABASE", "DATABASE_NAME", "DB_NAME_DEV", "DB_NAME_UAT")
+// Environment variables that override which pod env keys are inspected, as
+// comma-separated lists. Sites with their own naming conventions configure them
+// here instead of the names being compiled in.
+const (
+	DBHostKeysEnv = "KUBETRACE_DB_HOST_ENV_KEYS"
+	DBPortKeysEnv = "KUBETRACE_DB_PORT_ENV_KEYS"
+	DBNameKeysEnv = "KUBETRACE_DB_NAME_ENV_KEYS"
+	DBURLKeysEnv  = "KUBETRACE_DB_URL_ENV_KEYS"
+)
 
-	for _, key := range []string{"DATABASE_URL", "SPRING_DATASOURCE_URL", "DB_CONNECTION_STRING", "DB_URL", "DB_DSN", "JDBC_DATABASE_URL"} {
+var defaultDBEnvKeys = struct {
+	host, port, name, url []string
+}{
+	host: []string{"DB_HOST", "POSTGRES_HOST", "MYSQL_HOST", "DATABASE_HOST", "PGHOST", "MSSQL_HOST", "ORACLE_HOST"},
+	port: []string{"DB_PORT", "POSTGRES_PORT", "MYSQL_PORT", "DATABASE_PORT", "PGPORT", "MSSQL_PORT", "ORACLE_PORT"},
+	name: []string{"DB_NAME", "POSTGRES_DB", "MYSQL_DATABASE", "DB_DATABASE", "DATABASE_NAME", "PGDATABASE"},
+	url: []string{
+		"DATABASE_URL", "SPRING_DATASOURCE_URL", "DB_CONNECTION_STRING", "DB_URL", "DB_DSN",
+		"JDBC_DATABASE_URL", "POSTGRES_URL", "MYSQL_URL", "MONGODB_URI", "REDIS_URL",
+	},
+}
+
+var (
+	dbEnvKeysOnce sync.Once
+	dbHostKeys    []string
+	dbPortKeys    []string
+	dbNameKeys    []string
+	dbURLKeys     []string
+)
+
+func loadDBEnvKeys() {
+	dbEnvKeysOnce.Do(func() {
+		dbHostKeys = envKeyList(DBHostKeysEnv, defaultDBEnvKeys.host)
+		dbPortKeys = envKeyList(DBPortKeysEnv, defaultDBEnvKeys.port)
+		dbNameKeys = envKeyList(DBNameKeysEnv, defaultDBEnvKeys.name)
+		dbURLKeys = envKeyList(DBURLKeysEnv, defaultDBEnvKeys.url)
+	})
+}
+
+// envKeyList reads a comma-separated override, falling back to the defaults.
+func envKeyList(envVar string, defaults []string) []string {
+	raw := strings.TrimSpace(os.Getenv(envVar))
+	if raw == "" {
+		return defaults
+	}
+	var out []string
+	for _, key := range strings.Split(raw, ",") {
+		if key = strings.ToUpper(strings.TrimSpace(key)); key != "" {
+			out = append(out, key)
+		}
+	}
+	if len(out) == 0 {
+		return defaults
+	}
+	return out
+}
+
+// detectDatabaseInfo reads a pod's environment for the database it talks to.
+// Discrete host/port/name variables win over a connection string, since they
+// need no parsing; anything still missing is recovered from the URL forms.
+func detectDatabaseInfo(pod *corev1.Pod, configMaps map[string]map[string]string) (dbName, dbHost, dbPort string) {
+	loadDBEnvKeys()
+
+	envs := podEnvMap(pod, configMaps)
+	dbHost = firstEnvValue(envs, dbHostKeys...)
+	dbPort = firstEnvValue(envs, dbPortKeys...)
+	dbName = firstEnvValue(envs, dbNameKeys...)
+
+	if dbName != "" && dbHost != "" && dbPort != "" {
+		return dbName, dbHost, dbPort
+	}
+
+	for _, key := range dbURLKeys {
 		value := envs[key]
 		if value == "" {
 			continue
 		}
+		info := connstr.Parse(value)
 		if dbName == "" {
-			dbName = extractDbNameFromConnStr(value)
+			dbName = info.Database
 		}
-		if dbHost == "" || dbPort == "" {
-			host, port := parseHostPortFromConnStr(value)
-			if dbHost == "" && host != "" {
-				dbHost = host
-			}
-			if dbPort == "" && port != "" {
-				dbPort = port
-			}
+		if dbHost == "" {
+			dbHost = info.Host
+		}
+		if dbPort == "" {
+			dbPort = info.Port
+		}
+		if dbName != "" && dbHost != "" && dbPort != "" {
+			break
 		}
 	}
 	return dbName, dbHost, dbPort
@@ -63,85 +133,4 @@ func firstEnvValue(envs map[string]string, keys ...string) string {
 		}
 	}
 	return ""
-}
-
-func parseHostPortFromConnStr(connStr string) (string, string) {
-	connStr = strings.TrimSpace(connStr)
-	if connStr == "" {
-		return "", ""
-	}
-	if strings.Contains(connStr, "://") {
-		parts := strings.SplitN(connStr, "://", 2)
-		if len(parts) == 2 {
-			rem := parts[1]
-			atIdx := strings.LastIndex(rem, "@")
-			if atIdx != -1 {
-				rem = rem[atIdx+1:]
-			}
-			slashIdx := strings.Index(rem, "/")
-			if slashIdx != -1 {
-				rem = rem[:slashIdx]
-			}
-			if strings.Contains(rem, ":") {
-				hParts := strings.SplitN(rem, ":", 2)
-				return hParts[0], hParts[1]
-			}
-			return rem, ""
-		}
-	}
-	if strings.HasPrefix(connStr, "jdbc:") {
-		rem := strings.TrimPrefix(connStr, "jdbc:")
-		if strings.Contains(rem, "://") {
-			return parseHostPortFromConnStr(rem)
-		}
-		parts := strings.Split(rem, "/")
-		if len(parts) >= 3 {
-			hostPort := parts[2]
-			if strings.Contains(hostPort, ":") {
-				hParts := strings.SplitN(hostPort, ":", 2)
-				return hParts[0], hParts[1]
-			}
-			return hostPort, ""
-		}
-	}
-	return "", ""
-}
-
-func extractDbNameFromConnStr(connStr string) string {
-	connStr = strings.TrimSpace(connStr)
-	if connStr == "" {
-		return ""
-	}
-	if strings.Contains(connStr, "://") {
-		parts := strings.SplitN(connStr, "://", 2)
-		if len(parts) == 2 {
-			rem := parts[1]
-			atIdx := strings.LastIndex(rem, "@")
-			if atIdx != -1 {
-				rem = rem[atIdx+1:]
-			}
-			slashIdx := strings.Index(rem, "/")
-			if slashIdx != -1 {
-				dbPart := rem[slashIdx+1:]
-				return cleanDbNamePart(dbPart)
-			}
-		}
-	}
-	if strings.HasPrefix(connStr, "jdbc:") {
-		slashIdx := strings.LastIndex(connStr, "/")
-		if slashIdx != -1 {
-			return cleanDbNamePart(connStr[slashIdx+1:])
-		}
-	}
-	return ""
-}
-
-func cleanDbNamePart(dbPart string) string {
-	if qIdx := strings.Index(dbPart, "?"); qIdx != -1 {
-		dbPart = dbPart[:qIdx]
-	}
-	if semicolonIdx := strings.Index(dbPart, ";"); semicolonIdx != -1 {
-		dbPart = dbPart[:semicolonIdx]
-	}
-	return dbPart
 }

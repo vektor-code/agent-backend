@@ -13,6 +13,7 @@ import (
 type clusterState struct {
 	appNamespaces []string
 	reportedPods  []ReportedPod
+	reportedNodes []ReportedNode
 }
 
 func discoverClusterState(ctx context.Context, client *kubernetes.Clientset) (clusterState, error) {
@@ -25,11 +26,15 @@ func discoverClusterState(ctx context.Context, client *kubernetes.Clientset) (cl
 	configMapData := discoverConfigMapData(ctx, client)
 	frontendServices := discoverFrontendServices(ctx, client, appNamespaces)
 	servicesByNamespace := discoverServices(ctx, client, appNamespaces)
-	reportedPods := discoverReportedPods(ctx, client, frontendServices, servicesByNamespace, configMapData)
+	podMetrics := fetchPodMetrics(ctx, client)
+	nodeMetrics := fetchNodeMetrics(ctx, client)
+	reportedPods := discoverReportedPods(ctx, client, frontendServices, servicesByNamespace, configMapData, podMetrics)
+	reportedNodes := discoverReportedNodes(ctx, client, nodeMetrics)
 
 	return clusterState{
 		appNamespaces: appNamespaces,
 		reportedPods:  reportedPods,
+		reportedNodes: reportedNodes,
 	}, nil
 }
 
@@ -100,6 +105,7 @@ func discoverReportedPods(
 	frontendServices map[string]bool,
 	servicesByNamespace map[string][]corev1.Service,
 	configMapData map[string]map[string]string,
+	podMetrics metricsSnapshot,
 ) []ReportedPod {
 	podList, err := client.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -117,7 +123,22 @@ func discoverReportedPods(
 			frontendServices,
 			servicesByNamespace[pod.Namespace],
 			configMapData,
+			podMetrics,
 		))
 	}
 	return reportedPods
+}
+
+func discoverReportedNodes(ctx context.Context, client *kubernetes.Clientset, nodeMetrics nodeMetricsSnapshot) []ReportedNode {
+	nodeList, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Printf("[controller] error listing nodes: %v", err)
+		return nil
+	}
+
+	reportedNodes := make([]ReportedNode, 0, len(nodeList.Items))
+	for _, node := range nodeList.Items {
+		reportedNodes = append(reportedNodes, reportedNodeFromK8sNode(&node, nodeMetrics))
+	}
+	return reportedNodes
 }

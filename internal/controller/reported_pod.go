@@ -1,8 +1,6 @@
 package controller
 
 import (
-	"time"
-
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -25,6 +23,24 @@ type ReportedPod struct {
 	DatabaseHost        string            `json:"databaseHost"`
 	DatabasePort        string            `json:"databasePort"`
 	IsFrontend          bool              `json:"isFrontend"`
+	// MetricsAvailable is false when metrics-server did not report this pod.
+	// The dashboard uses it to show "unavailable" rather than a zero that
+	// looks like idleness.
+	MetricsAvailable bool `json:"metricsAvailable"`
+}
+
+type ReportedNode struct {
+	Name              string  `json:"name"`
+	Role              string  `json:"role"`
+	CpuCapacity       float64 `json:"cpuCapacity"`
+	CpuAllocatable    float64 `json:"cpuAllocatable"`
+	MemoryCapacity    float64 `json:"memoryCapacity"`
+	MemoryAllocatable float64 `json:"memoryAllocatable"`
+	PodCapacity       int     `json:"podCapacity"`
+	PodAllocatable    int     `json:"podAllocatable"`
+	CpuUsage          float64 `json:"cpuUsage"`
+	MemoryUsage       float64 `json:"memoryUsage"`
+	MetricsAvailable  bool    `json:"metricsAvailable"`
 }
 
 func reportedPodFromK8sPod(
@@ -32,12 +48,14 @@ func reportedPodFromK8sPod(
 	frontendServices map[string]bool,
 	services []corev1.Service,
 	configMapData map[string]map[string]string,
+	podMetrics metricsSnapshot,
 ) ReportedPod {
 	isFrontend := isFrontendPod(pod, frontendServices, services)
 	lang := detectLanguageFromPodSpec(pod, isFrontend)
 	inst, instType, details := getPodInstrumentationStatus(pod)
 	dbName, dbHost, dbPort := detectDatabaseInfo(pod, configMapData)
-	cpuUsage, cpuLimit, memoryUsage, memoryLimit := resourceUsageForPod(pod)
+	cpuLimit, memoryLimit := resourceLimitsForPod(pod)
+	usage, measured := podMetrics.usage[pod.Namespace+"/"+pod.Name]
 
 	return ReportedPod{
 		Name:                pod.Name,
@@ -45,10 +63,11 @@ func reportedPodFromK8sPod(
 		NodeName:            pod.Spec.NodeName,
 		Labels:              pod.Labels,
 		Phase:               string(pod.Status.Phase),
-		CpuUsage:            cpuUsage,
+		CpuUsage:            usage.CPUMilli,
 		CpuLimit:            cpuLimit,
-		MemoryUsage:         memoryUsage,
+		MemoryUsage:         usage.MemoryMi,
 		MemoryLimit:         memoryLimit,
+		MetricsAvailable:    measured && podMetrics.available,
 		RestartCount:        restartCount(pod),
 		Language:            lang,
 		Instrumented:        inst,
@@ -61,33 +80,32 @@ func reportedPodFromK8sPod(
 	}
 }
 
-func resourceUsageForPod(pod *corev1.Pod) (cpuUsage, cpuLimit, memoryUsage, memoryLimit float64) {
-	cpuLimit = 1000.0
-	memoryLimit = 1024.0
-	for _, container := range pod.Spec.Containers {
-		if limit, ok := container.Resources.Limits["cpu"]; ok {
-			cpuLimit = float64(limit.MilliValue())
-		}
-		if limit, ok := container.Resources.Limits["memory"]; ok {
-			memoryLimit = float64(limit.Value()) / (1024 * 1024)
-		}
+func reportedNodeFromK8sNode(node *corev1.Node, nodeMetrics nodeMetricsSnapshot) ReportedNode {
+	usage, measured := nodeMetrics.usage[node.Name]
+	return ReportedNode{
+		Name:              node.Name,
+		Role:              nodeRole(node.Labels),
+		CpuCapacity:       float64(node.Status.Capacity.Cpu().MilliValue()),
+		CpuAllocatable:    float64(node.Status.Allocatable.Cpu().MilliValue()),
+		MemoryCapacity:    float64(node.Status.Capacity.Memory().Value()) / (1024 * 1024),
+		MemoryAllocatable: float64(node.Status.Allocatable.Memory().Value()) / (1024 * 1024),
+		PodCapacity:       int(node.Status.Capacity.Pods().Value()),
+		PodAllocatable:    int(node.Status.Allocatable.Pods().Value()),
+		CpuUsage:          usage.CPUMilli,
+		MemoryUsage:       usage.MemoryMi,
+		MetricsAvailable:  measured && nodeMetrics.available,
 	}
-
-	seed := float64(time.Now().UnixNano() % 100)
-	cpuUsage = 20.0 + (seed * 0.1)
-	memoryUsage = 150.0 + (seed * 0.2)
-	if cpuUsage > cpuLimit {
-		cpuUsage = cpuLimit * 0.5
-	}
-	if memoryUsage > memoryLimit {
-		memoryUsage = memoryLimit * 0.5
-	}
-	return cpuUsage, cpuLimit, memoryUsage, memoryLimit
 }
 
-func restartCount(pod *corev1.Pod) int {
-	if len(pod.Status.ContainerStatuses) == 0 {
-		return 0
+func nodeRole(labels map[string]string) string {
+	if labels == nil {
+		return "worker"
 	}
-	return int(pod.Status.ContainerStatuses[0].RestartCount)
+	if _, ok := labels["node-role.kubernetes.io/control-plane"]; ok {
+		return "master"
+	}
+	if _, ok := labels["node-role.kubernetes.io/master"]; ok {
+		return "master"
+	}
+	return "worker"
 }

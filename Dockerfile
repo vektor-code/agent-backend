@@ -1,17 +1,26 @@
+# Self-contained build: the build context is THIS directory. The shared code
+# lives in ./shared and is wired in via `replace github.com/kubetrace/shared => ./shared`,
+# so no sibling module is needed:
+#   docker build -f Dockerfile .
+#
 # --- Stage 1: Build ---
 FROM golang:1.25-alpine AS builder
 
-WORKDIR /app
+# Module mode, not workspace mode.
+ENV GOWORK=off
 
-# Copy dependency files
+WORKDIR /src
+
+# Dependency manifests first, so the module cache layer survives source edits.
+COPY shared/go.mod ./shared/
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
+# Source code (service + vendored shared package)
 COPY . .
 
 # Build statically linked binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o agent ./cmd/agent-backend
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /out/agent ./cmd/agent-backend
 
 # --- Stage 2: Final image ---
 FROM alpine:3.19
@@ -25,7 +34,7 @@ WORKDIR /app
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
-COPY --from=builder /app/agent .
+COPY --from=builder /out/agent .
 
 EXPOSE 4317 4318
 
