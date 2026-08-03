@@ -18,6 +18,7 @@ func Run(ctx context.Context, centralURL string, client *http.Client) {
 
 	configURL := namespaceConfigURL(centralURL)
 	clusterName := currentClusterName()
+	prevEnabled := map[string]bool{}
 
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -40,8 +41,22 @@ func Run(ctx context.Context, centralURL string, client *http.Client) {
 				continue
 			}
 
-			reconcileInstrumentations(ctx, clients.dynamic, state.appNamespaces, enabledMap)
+			restartNamespaces := reconcileInstrumentations(
+				ctx,
+				clients.dynamic,
+				clients.kube,
+				state.appNamespaces,
+				enabledMap,
+				prevEnabled,
+			)
+			// Apply per-service inject annotations first, then roll namespaces
+			// whose Instrumentation CR was created/toggled so pods are admitted
+			// with the webhook against a live CR.
 			reconcileWorkloadInstrumentation(ctx, clients.kube, workloads)
+			for _, ns := range restartNamespaces {
+				restartAnnotatedWorkloads(ctx, clients.kube, ns)
+			}
+			prevEnabled = enabledMap
 		}
 	}
 }
