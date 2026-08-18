@@ -209,8 +209,8 @@ func (e *Executor) level1NetworkPolicy(ctx context.Context, in Intent) []Observa
 }
 
 func (e *Executor) httpRequest(ctx context.Context, in Intent, maxLevel int) (*Observation, int) {
-	cmd, err := httpProbeArgv(in.DestinationURL)
-	if err != nil {
+	cmds, err := probeCommands(in.DestinationURL)
+	if err != nil || len(cmds) == 0 {
 		obs := observed("http_request", "Destination URL is not a permitted probe target", 2, false, "")
 		return &obs, 1
 	}
@@ -219,22 +219,35 @@ func (e *Executor) httpRequest(ctx context.Context, in Intent, maxLevel int) (*O
 		obs := observed("http_request", how, 2, false, "")
 		return &obs, 1
 	}
-	obs, skippedNoShell := e.execProbe(ctx, in, pod, level, how, cmd)
-	if skippedNoShell && maxLevel >= 3 && (pod.Labels == nil || pod.Labels["app"] != "crnet-diagnostics") {
+	obs, ran := e.runProbeCommands(ctx, in, pod, level, how, cmds)
+	if ran {
+		return obs, level
+	}
+	if maxLevel >= 3 && (pod.Labels == nil || pod.Labels["app"] != "crnet-diagnostics") {
 		if worker, err := e.cluster.FindDiagnosticPod(ctx, in.Namespace); err == nil && worker != nil && worker.Name != pod.Name {
-			wobs, wSkip := e.execProbe(ctx, in, worker, 3, "source container has no /bin/sh; reused diagnostic worker "+worker.Name, cmd)
-			if !wSkip && wobs != nil {
+			wobs, wRan := e.runProbeCommands(ctx, in, worker, 3, "source container has no shell; reused diagnostic worker "+worker.Name, cmds)
+			if wRan {
 				return wobs, 3
 			}
 		}
-		skip := observed("http_request", "Live HTTP probe skipped: container has no /bin/sh", 2, false, pod.Name)
-		return &skip, 2
 	}
-	if skippedNoShell {
-		skip := observed("http_request", "Live HTTP probe skipped: container has no /bin/sh", level, false, pod.Name)
-		return &skip, level
+	skip := observed("http_request", "Live HTTP probe skipped: container has no /bin/sh and no usable HTTP client", level, false, pod.Name)
+	return &skip, level
+}
+
+func (e *Executor) runProbeCommands(ctx context.Context, in Intent, pod *PodView, level int, how string, cmds [][]string) (*Observation, bool) {
+	for i, cmd := range cmds {
+		label := how
+		if i > 0 && len(cmd) > 0 {
+			label = how + "; probed via " + cmd[0]
+		}
+		obs, missing := e.execProbe(ctx, in, pod, level, label, cmd)
+		if missing {
+			continue
+		}
+		return obs, true
 	}
-	return obs, level
+	return nil, false
 }
 
 func (e *Executor) execProbe(ctx context.Context, in Intent, pod *PodView, level int, how string, cmd []string) (*Observation, bool) {
@@ -247,7 +260,7 @@ func (e *Executor) execProbe(ctx context.Context, in Intent, pod *PodView, level
 		defer release()
 	}
 	res, execErr := e.cluster.Exec(ctx, pod.Namespace, pod.Name, pod.Container, cmd)
-	if noShellExec(execErr, res) {
+	if missingExecBinary(execErr, res) {
 		return nil, true
 	}
 	detail := how
@@ -324,8 +337,8 @@ func conclude(in Intent, obs []Observation) (string, string, string, string) {
 		}
 		return original, "NOT REPRODUCED", msg, "MEDIUM"
 	}
-	if probeSkippedNoShell(probe) {
-		inf := "Live HTTP probe could not run because the source container has no /bin/sh. Original classification is unchanged"
+	if probeSkippedNoClient(probe) {
+		inf := "Live HTTP probe could not run because the source container has no /bin/sh and no usable HTTP client. Original classification is unchanged"
 		if sourceNotReady(sourceReady) {
 			inf += ". The source pod is currently not Ready; that is live source state and does not by itself explain the recorded external upstream failure"
 		}
@@ -346,12 +359,12 @@ func conclude(in Intent, obs []Observation) (string, string, string, string) {
 	return original, "INCONCLUSIVE", "Live verification completed; see observed evidence", "LOW"
 }
 
-func probeSkippedNoShell(probe *Observation) bool {
+func probeSkippedNoClient(probe *Observation) bool {
 	if probe == nil {
 		return false
 	}
 	msg := strings.ToLower(probe.Message)
-	return strings.Contains(msg, "no /bin/sh") || strings.Contains(msg, "container has no /bin/sh")
+	return strings.Contains(msg, "no usable http client") || strings.Contains(msg, "no /bin/sh")
 }
 
 func sourceNotReady(o *Observation) bool {
@@ -366,24 +379,17 @@ func destIsExternalOrLocal(destType, host string) bool {
 	return isLocalhostTarget(host)
 }
 
-func noShellExec(err error, res *ExecResult) bool {
-	var b strings.Builder
-	if err != nil {
-		b.WriteString(err.Error())
+func missingExecBinary(err error, res *ExecResult) bool {
+	if err == nil {
+		return false
 	}
+	s := strings.ToLower(err.Error())
 	if res != nil {
-		b.WriteString(res.Stdout)
-		b.WriteString(" ")
-		b.WriteString(res.Stderr)
+		s += " " + strings.ToLower(res.Stdout+" "+res.Stderr)
 	}
-	s := strings.ToLower(b.String())
-	if strings.Contains(s, "/bin/sh") && (strings.Contains(s, "no such file") || strings.Contains(s, "executable file not found") || strings.Contains(s, "stat /bin/sh")) {
-		return true
-	}
-	if strings.Contains(s, "/bin/bash") && strings.Contains(s, "no such file") {
-		return true
-	}
-	return false
+	return strings.Contains(s, "no such file") ||
+		strings.Contains(s, "executable file not found") ||
+		strings.Contains(s, "stat /bin/sh")
 }
 
 func anyObservedOK(obs []Observation) bool {

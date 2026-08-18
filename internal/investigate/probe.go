@@ -6,24 +6,78 @@ import (
 	"strconv"
 )
 
-func httpProbeArgv(raw string) ([]string, error) {
+func cleanProbeURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported scheme")
+		return "", fmt.Errorf("unsupported scheme")
 	}
 	if u.Host == "" || u.User != nil {
-		return nil, fmt.Errorf("invalid host")
+		return "", fmt.Errorf("invalid host")
 	}
 	cleaned := u.Scheme + "://" + u.Host + u.EscapedPath()
 	if u.RawQuery != "" {
 		cleaned += "?" + u.RawQuery
 	}
-	quoted := strconv.Quote(cleaned)
-	return []string{"/bin/sh", "-c", fmt.Sprintf(httpProbeScript, quoted, quoted, quoted)}, nil
+	return cleaned, nil
 }
+
+func httpProbeArgv(raw string) ([]string, error) {
+	cmds, err := probeCommands(raw)
+	if err != nil || len(cmds) == 0 {
+		return nil, err
+	}
+	return cmds[0], nil
+}
+
+// probeCommands returns exec argv lists to try in order. The URL is passed as a
+// separate argument wherever possible so it is not interpolated into code.
+// We never download or install a shell into the application container.
+func probeCommands(raw string) ([][]string, error) {
+	cleaned, err := cleanProbeURL(raw)
+	if err != nil {
+		return nil, err
+	}
+	quoted := strconv.Quote(cleaned)
+	return [][]string{
+		{"/bin/sh", "-c", fmt.Sprintf(httpProbeScript, quoted, quoted, quoted)},
+		{"/nodejs/bin/node", "-e", nodeProbeScript, cleaned},
+		{"node", "-e", nodeProbeScript, cleaned},
+		{"python3", "-c", python3ProbeScript, cleaned},
+		{"python", "-c", python2ProbeScript, cleaned},
+		{"curl", "-sS", "-o", "/dev/null", "-D", "-", "--connect-timeout", "2", "--max-time", "5", cleaned},
+		{"wget", "-S", "-O", "/dev/null", "-T", "2", "--tries=1", cleaned},
+	}, nil
+}
+
+// nodeProbeScript reads the URL from argv so caller input cannot break out of
+// the script. Extra args to `node -e` start at process.argv[1].
+const nodeProbeScript = `const u=process.argv[1];
+if(!u||(u.indexOf("http://")!==0&&u.indexOf("https://")!==0)){console.error("PROBE_ERROR bad url");process.exit(2)}
+const lib=u.startsWith("https:")?require("https"):require("http");
+const req=lib.get(u,{timeout:5000},res=>{console.log("HTTP_STATUS",res.statusCode);res.resume();process.exit(0)});
+req.on("error",e=>{console.error(e.code||"",e.message);process.exit(1)});
+req.on("timeout",()=>{console.error("ETIMEDOUT");req.destroy();process.exit(1)});`
+
+const python3ProbeScript = `import sys,urllib.request,urllib.error
+u=sys.argv[1]
+try:
+ r=urllib.request.urlopen(u,timeout=5)
+ print("HTTP_STATUS",r.status)
+except urllib.error.HTTPError as e:
+ print("HTTP_STATUS",e.code)
+`
+
+const python2ProbeScript = `import sys,urllib2
+u=sys.argv[1]
+try:
+ r=urllib2.urlopen(u,timeout=5)
+ print("HTTP_STATUS",r.getcode())
+except urllib2.HTTPError as e:
+ print("HTTP_STATUS",e.code)
+`
 
 // httpProbeScript prefers an existing client. If none exists and we are root it
 // may install wget, run one GET, then uninstall via trap. It never upgrades

@@ -282,6 +282,70 @@ func TestHttpProbeRejectsInjection(t *testing.T) {
 	if strings.Contains(script, "apk upgrade") || strings.Contains(script, "apt-get update") {
 		t.Fatal("probe must not upgrade packages")
 	}
+	cmds, err := probeCommands("https://www.googletagmanager.com/sgtm/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundNode := false
+	for _, cmd := range cmds {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "nodejs/bin/node") {
+			foundNode = true
+			if strings.Contains(cmd[2], "googletagmanager") {
+				t.Fatal("node probe script must not interpolate the URL")
+			}
+			if cmd[len(cmd)-1] != "https://www.googletagmanager.com/sgtm/a" {
+				t.Fatalf("node probe must pass URL as argv, got %v", cmd)
+			}
+		}
+	}
+	if !foundNode {
+		t.Fatal("expected a node argv fallback for distroless images")
+	}
+}
+
+func TestExecutorNoShellUsesNode(t *testing.T) {
+	src := &PodView{Name: "gtm-server-a", Namespace: "highping-dev", Phase: "Running", Ready: true, Workload: "gtm-server", Container: "gtm"}
+	fake := &fakeCluster{
+		pods: map[string]*PodView{"highping-dev/gtm-server-a": src},
+		execFn: func(_, name, _ string, argv []string) (*ExecResult, error) {
+			if len(argv) == 0 {
+				return nil, fmt.Errorf("empty argv")
+			}
+			switch argv[0] {
+			case "/nodejs/bin/node", "node":
+				return &ExecResult{Stdout: "HTTP_STATUS 404\n"}, nil
+			default:
+				return nil, fmt.Errorf(`exec: %q: stat %s: no such file or directory`, argv[0], argv[0])
+			}
+		},
+	}
+	ex := NewExecutor(fake, func(string) bool { return true }, "crnet-apm")
+	in := Intent{
+		InvestigationType: TypeNetworkTimeout,
+		Namespace:         "highping-dev",
+		SourceWorkload:    "gtm-server",
+		SourcePod:         "gtm-server-a",
+		Destination:       "www.googletagmanager.com:443",
+		DestinationURL:    "https://www.googletagmanager.com/",
+		DestinationType:   "external_dns",
+		Checks:            []string{CheckPodStatus, CheckHTTPRequest},
+		MaxLevel:          3,
+		Fingerprint:       "fp-node-probe",
+	}
+	res := ex.Run(context.Background(), in)
+	if res.CurrentState != "NOT REPRODUCED" {
+		t.Fatalf("current=%q inference=%q obs=%+v", res.CurrentState, res.Inference, res.Observations)
+	}
+	found := false
+	for _, o := range res.Observations {
+		if o.Code == "http_request" && strings.Contains(o.Message, "probed via /nodejs/bin/node") && strings.Contains(o.Message, "HTTP 404") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected node fallback probe, got %+v", res.Observations)
+	}
 }
 
 func TestExecutorExternalSourceNotReadyNoShell(t *testing.T) {
@@ -322,8 +386,8 @@ func TestExecutorExternalSourceNotReadyNoShell(t *testing.T) {
 	if strings.Contains(strings.ToLower(res.Inference), "target pod is not ready") {
 		t.Fatalf("must not treat source pod as the external target: %q", res.Inference)
 	}
-	if !strings.Contains(res.Inference, "no /bin/sh") {
-		t.Fatalf("inference should mention missing shell: %q", res.Inference)
+	if !strings.Contains(res.Inference, "no usable HTTP client") && !strings.Contains(res.Inference, "no /bin/sh") {
+		t.Fatalf("inference should mention missing probe client: %q", res.Inference)
 	}
 	sawSource, sawDestPod, sawHTTPSkip, sawExternal := false, false, false, false
 	for _, o := range res.Observations {
@@ -333,7 +397,7 @@ func TestExecutorExternalSourceNotReadyNoShell(t *testing.T) {
 		if o.Code == "pod_status" && strings.Contains(o.Message, "Pod "+pod.Name) {
 			sawDestPod = true
 		}
-		if o.Code == "http_request" && strings.Contains(o.Message, "no /bin/sh") {
+		if o.Code == "http_request" && (strings.Contains(o.Message, "no /bin/sh") || strings.Contains(o.Message, "no usable HTTP client")) {
 			sawHTTPSkip = true
 		}
 		if o.Code == "destination_context" && strings.Contains(o.Message, "www.googletagmanager.com:443") {
