@@ -15,6 +15,7 @@ import (
 type controllerClients struct {
 	kube    *kubernetes.Clientset
 	dynamic dynamic.Interface
+	config  *rest.Config
 }
 
 var instrumentationGVR = schema.GroupVersionResource{
@@ -46,6 +47,7 @@ func newControllerClients() (*controllerClients, error) {
 	return &controllerClients{
 		kube:    kubeClient,
 		dynamic: dynamicClient,
+		config:  config,
 	}, nil
 }
 

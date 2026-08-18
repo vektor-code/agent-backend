@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/kubetrace/agent-backend/internal/investigate"
 )
 
 func Run(ctx context.Context, centralURL string, client *http.Client) {
@@ -19,6 +21,17 @@ func Run(ctx context.Context, centralURL string, client *http.Client) {
 	configURL := namespaceConfigURL(centralURL)
 	clusterName := currentClusterName()
 	prevEnabled := map[string]bool{}
+
+	runner := investigate.NewRunner(investigate.Config{
+		CentralURL:     centralURL,
+		HTTP:           client,
+		Kube:           clients.kube,
+		REST:           clients.config,
+		ClusterName:    clusterName,
+		AgentNamespace: currentAgentNamespace(),
+		IsAppNamespace: isAppNamespace,
+	})
+	go runner.Poll(ctx)
 
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -35,10 +48,13 @@ func Run(ctx context.Context, centralURL string, client *http.Client) {
 				continue
 			}
 
-			enabledMap, workloads, err := syncNamespaceConfig(client, configURL, clusterName, state.appNamespaces, state.reportedPods, state.reportedNodes)
+			enabledMap, workloads, jobs, err := syncNamespaceConfig(client, configURL, clusterName, state.appNamespaces, state.reportedPods, state.reportedNodes)
 			if err != nil {
 				log.Printf("[controller] error syncing configurations: %v", err)
 				continue
+			}
+			for _, raw := range jobs {
+				runner.HandleRaw(ctx, raw)
 			}
 
 			restartNamespaces := reconcileInstrumentations(

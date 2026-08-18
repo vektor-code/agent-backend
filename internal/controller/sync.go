@@ -17,7 +17,7 @@ type workloadConfig struct {
 	Language     string `json:"language"`
 }
 
-func syncNamespaceConfig(client *http.Client, url, clusterName string, namespaces []string, pods []ReportedPod, nodes []ReportedNode) (map[string]bool, []workloadConfig, error) {
+func syncNamespaceConfig(client *http.Client, url, clusterName string, namespaces []string, pods []ReportedPod, nodes []ReportedNode) (map[string]bool, []workloadConfig, []json.RawMessage, error) {
 	payload, err := json.Marshal(map[string]interface{}{
 		"cluster":        clusterName,
 		"agentNamespace": currentAgentNamespace(),
@@ -26,36 +26,37 @@ func syncNamespaceConfig(client *http.Client, url, clusterName string, namespace
 		"nodes":          nodes,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	req, err := http.NewRequest("POST", url, strings.NewReader(string(payload)))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("bad status code: %d", resp.StatusCode)
+		return nil, nil, nil, fmt.Errorf("bad status code: %d", resp.StatusCode)
 	}
 
 	var data struct {
-		Enabled   []string         `json:"enabled"`
-		Workloads []workloadConfig `json:"workloads"`
+		Enabled         []string          `json:"enabled"`
+		Workloads       []workloadConfig  `json:"workloads"`
+		Investigations  []json.RawMessage `json:"investigations"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	res := make(map[string]bool)
 	for _, ns := range data.Enabled {
 		res[ns] = true
 	}
-	return res, data.Workloads, nil
+	return res, data.Workloads, data.Investigations, nil
 }
