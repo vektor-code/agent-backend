@@ -231,7 +231,7 @@ func (e *Executor) httpRequest(ctx context.Context, in Intent, maxLevel int) (*O
 			}
 		}
 	}
-	skip := observed("http_request", "Live HTTP probe skipped: container has no /bin/sh and no usable HTTP client", level, false, pod.Name)
+	skip := observed("http_request", "Live HTTP probe skipped: container has no usable HTTP client for this runtime", level, false, pod.Name)
 	return &skip, level
 }
 
@@ -343,6 +343,9 @@ func conclude(in Intent, obs []Observation) (string, string, string, string) {
 		}
 		return original, "Not reproduced", msg, "MEDIUM"
 	}
+	if probe != nil && probe.OK != nil && !*probe.OK && in.InvestigationType == TypeNetworkTimeout && probeShowsTransportFailure(probe.Message) {
+		return original, "Still failing", "A live retry from the same source pod still could not complete an HTTP response to this destination. That supports the original transport / upstream connectivity classification", "MEDIUM"
+	}
 	if probeSkippedNoClient(probe) {
 		inf := "Live HTTP probe could not run because the source container has no /bin/sh and no usable HTTP client. Original classification is unchanged"
 		if sourceNotReady(sourceReady) {
@@ -370,7 +373,16 @@ func probeSkippedNoClient(probe *Observation) bool {
 		return false
 	}
 	msg := strings.ToLower(probe.Message)
-	return strings.Contains(msg, "no usable http client") || strings.Contains(msg, "no /bin/sh")
+	return strings.Contains(msg, "no usable http client") || strings.Contains(msg, "no /bin/sh") || strings.Contains(msg, "no usable HTTP client")
+}
+
+func probeShowsTransportFailure(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "timed out") ||
+		strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "no route to host") ||
+		strings.Contains(lower, "network is unreachable")
 }
 
 func sourceNotReady(o *Observation) bool {

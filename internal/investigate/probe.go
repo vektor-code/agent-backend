@@ -47,6 +47,8 @@ func probeCommands(raw string) ([][]string, error) {
 		{"node", "-e", nodeProbeScript, cleaned},
 		{"python3", "-c", python3ProbeScript, cleaned},
 		{"python", "-c", python2ProbeScript, cleaned},
+		{"php", "-r", phpProbeScript, "--", cleaned},
+		{"ruby", "-e", rubyProbeScript, cleaned},
 		{"curl", "-sS", "-o", "/dev/null", "-D", "-", "--connect-timeout", "2", "--max-time", "5", cleaned},
 		{"wget", "-S", "-O", "/dev/null", "-T", "2", "--tries=1", cleaned},
 	}, nil
@@ -77,6 +79,24 @@ try:
  print("HTTP_STATUS",r.getcode())
 except urllib2.HTTPError as e:
  print("HTTP_STATUS",e.code)
+`
+
+const phpProbeScript = `$u=$argv[1]??"";
+if($u===""||(strpos($u,"http://")!==0&&strpos($u,"https://")!==0)){fwrite(STDERR,"PROBE_ERROR bad url\n");exit(2);}
+$ctx=stream_context_create(["http"=>["timeout"=>5,"ignore_errors"=>true],"ssl"=>["verify_peer"=>true]]);
+$h=@get_headers($u,0,$ctx);
+if($h&&isset($h[0])&&preg_match("/HTTP\\/\\S+\\s+(\\d+)/",$h[0],$m)){echo "HTTP_STATUS ".$m[1]."\n";exit(0);}
+fwrite(STDERR,"PROBE_ERROR no status\n");exit(1);`
+
+const rubyProbeScript = `require "net/http";require "uri"
+u=URI(ARGV[0])
+abort("PROBE_ERROR bad url") if !u||(u.scheme!="http"&&u.scheme!="https")
+http=Net::HTTP.new(u.host,u.port)
+http.use_ssl=(u.scheme=="https")
+http.open_timeout=2
+http.read_timeout=5
+res=http.request_get(u.request_uri)
+puts "HTTP_STATUS #{res.code}"
 `
 
 // httpProbeScript prefers an existing client. If none exists and we are root it
@@ -115,6 +135,8 @@ have_client() {
   command -v curl >/dev/null 2>&1 && return 0
   command -v python3 >/dev/null 2>&1 && return 0
   command -v python >/dev/null 2>&1 && return 0
+  command -v php >/dev/null 2>&1 && return 0
+  command -v ruby >/dev/null 2>&1 && return 0
   command -v busybox >/dev/null 2>&1 && return 0
   return 1
 }
@@ -147,6 +169,14 @@ try:
 except urllib2.HTTPError as e:
  print("HTTP_STATUS", e.code)
 '
+    return $?
+  fi
+  if command -v php >/dev/null 2>&1; then
+    php -r '$u=$argv[1];$ctx=stream_context_create(["http"=>["timeout"=>5,"ignore_errors"=>true]]);$h=@get_headers($u,0,$ctx);if($h&&isset($h[0])&&preg_match("/HTTP\/\S+\s+(\d+)/",$h[0],$m)){echo "HTTP_STATUS ".$m[1]."\n";exit(0);}fwrite(STDERR,"PROBE_ERROR\n");exit(1);' -- "$URL"
+    return $?
+  fi
+  if command -v ruby >/dev/null 2>&1; then
+    ruby -e 'require "net/http";require "uri";u=URI(ARGV[0]);h=Net::HTTP.new(u.host,u.port);h.use_ssl=(u.scheme=="https");h.open_timeout=2;h.read_timeout=5;r=h.request_get(u.request_uri);puts "HTTP_STATUS #{r.code}"' "$URL"
     return $?
   fi
   if command -v busybox >/dev/null 2>&1; then

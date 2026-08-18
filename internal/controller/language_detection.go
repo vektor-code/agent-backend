@@ -33,6 +33,12 @@ func languageFromAnnotations(annotations map[string]string) string {
 		if strings.Contains(key, "inject-python") && value != "" {
 			return "python"
 		}
+		if strings.Contains(key, "inject-dotnet") && value != "" {
+			return "dotnet"
+		}
+		if strings.Contains(key, "inject-php") && value != "" {
+			return "php"
+		}
 		if strings.Contains(key, "inject-go") && value != "" {
 			return "go"
 		}
@@ -74,14 +80,17 @@ func languageFromContainers(pod *corev1.Pod) string {
 		if strings.Contains(img, "python") || strings.Contains(img, "gunicorn") || strings.Contains(img, "flask") || strings.Contains(img, "django") {
 			return "python"
 		}
-		if strings.Contains(img, "php") || strings.Contains(img, "wordpress") || strings.Contains(img, "apache") || strings.Contains(img, "fpm") {
+		if strings.Contains(img, "php") || strings.Contains(img, "wordpress") || strings.Contains(img, "php-fpm") {
 			return "php"
 		}
-		if strings.Contains(img, "go") || strings.Contains(img, "golang") {
-			return "go"
+		if strings.Contains(img, "ruby") || strings.Contains(img, "rails") {
+			return "ruby"
 		}
 		if strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") || strings.Contains(img, "microsoft-dotnet") {
 			return "dotnet"
+		}
+		if strings.Contains(img, "golang") || strings.Contains(img, "/go:") || strings.Contains(img, "/go@") || strings.HasPrefix(img, "go:") {
+			return "go"
 		}
 
 		for _, env := range c.Env {
@@ -98,8 +107,14 @@ func languageFromContainers(pod *corev1.Pod) string {
 			if strings.Contains(name, "PHP_") {
 				return "php"
 			}
+			if strings.Contains(name, "RUBY") || name == "BUNDLE_PATH" {
+				return "ruby"
+			}
 			if strings.Contains(name, "DOTNET_") || strings.Contains(name, "ASPNETCORE_") {
 				return "dotnet"
+			}
+			if strings.Contains(name, "GOPATH") || strings.Contains(name, "GOROOT") {
+				return "go"
 			}
 		}
 	}
@@ -120,7 +135,10 @@ func languageFromPodName(name string) string {
 	if strings.Contains(podName, "php") {
 		return "php"
 	}
-	if strings.Contains(podName, "go") {
+	if strings.Contains(podName, "ruby") || strings.Contains(podName, "rails") {
+		return "ruby"
+	}
+	if strings.Contains(podName, "golang") || strings.HasPrefix(podName, "go-") || strings.Contains(podName, "-go-") {
 		return "go"
 	}
 	return ""

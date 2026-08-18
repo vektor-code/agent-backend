@@ -267,6 +267,37 @@ func TestExecutorExternalTargetSkipsServiceChecksAndMarksNotReproduced(t *testin
 	}
 }
 
+func TestExecutorExternalTargetTimeoutStillFailing(t *testing.T) {
+	pod := &PodView{Name: "ilstsdujaxvwapq-7b9655647-j8rng", Namespace: "highping-client", Phase: "Running", Ready: true, Workload: "ilstsdujaxvwapq", Container: "app"}
+	fake := &fakeCluster{
+		pods:    map[string]*PodView{"highping-client/ilstsdujaxvwapq-7b9655647-j8rng": pod},
+		execOut: &ExecResult{Stderr: "Connecting to sgtm.biopet.az:52766 (104.21.12.16:52766)\nwget: download timed out\n"},
+	}
+	ex := NewExecutor(fake, func(string) bool { return true }, "crnet-apm")
+	in := Intent{
+		InvestigationType: TypeNetworkTimeout,
+		ClusterID:         "crtnet-ext-k8s",
+		Namespace:         "highping-client",
+		SourceWorkload:    "ilstsdujaxvwapq",
+		SourcePod:         "ilstsdujaxvwapq-7b9655647-j8rng",
+		Destination:       "sgtm.biopet.az:52766",
+		DestinationURL:    "http://sgtm.biopet.az:52766/g/collect",
+		DestinationType:   "external_dns",
+		RecordedHTTP:      0,
+		Checks:            []string{CheckPodStatus, CheckHTTPRequest},
+		MaxLevel:          3,
+		TraceID:           "t-ext-timeout",
+		Fingerprint:       "fp-ext-timeout",
+	}
+	res := ex.Run(context.Background(), in)
+	if res.CurrentState != "Still failing" {
+		t.Fatalf("current=%q inference=%q", res.CurrentState, res.Inference)
+	}
+	if res.OriginalState != "Transport / upstream connectivity" {
+		t.Fatalf("original=%q", res.OriginalState)
+	}
+}
+
 func TestHttpProbeRejectsInjection(t *testing.T) {
 	if _, err := httpProbeArgv("javascript:alert(1)"); err == nil {
 		t.Fatal("non-http schemes must be rejected")
@@ -287,6 +318,8 @@ func TestHttpProbeRejectsInjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	foundNode := false
+	foundPHP := false
+	foundRuby := false
 	for _, cmd := range cmds {
 		joined := strings.Join(cmd, " ")
 		if strings.Contains(joined, "nodejs/bin/node") {
@@ -298,9 +331,24 @@ func TestHttpProbeRejectsInjection(t *testing.T) {
 				t.Fatalf("node probe must pass URL as argv, got %v", cmd)
 			}
 		}
+		if len(cmd) > 0 && cmd[0] == "php" {
+			foundPHP = true
+			if cmd[len(cmd)-1] != "https://www.googletagmanager.com/sgtm/a" {
+				t.Fatalf("php probe must pass URL as argv, got %v", cmd)
+			}
+		}
+		if len(cmd) > 0 && cmd[0] == "ruby" {
+			foundRuby = true
+			if cmd[len(cmd)-1] != "https://www.googletagmanager.com/sgtm/a" {
+				t.Fatalf("ruby probe must pass URL as argv, got %v", cmd)
+			}
+		}
 	}
 	if !foundNode {
 		t.Fatal("expected a node argv fallback for distroless images")
+	}
+	if !foundPHP || !foundRuby {
+		t.Fatalf("expected php and ruby argv fallbacks, php=%v ruby=%v", foundPHP, foundRuby)
 	}
 }
 
