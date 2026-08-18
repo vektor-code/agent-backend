@@ -106,6 +106,10 @@ func admit(in Intent, isAppNS func(string) bool, agentNS string) (admission, err
 	if len(checks) == 0 {
 		return admission{}, fmt.Errorf("no allowlisted checks remain")
 	}
+	checks = filterChecksForDestination(in.DestinationType, checks)
+	if len(checks) == 0 {
+		return admission{}, fmt.Errorf("no relevant checks remain for destination type %q", in.DestinationType)
+	}
 	if seen[CheckHTTPRequest] {
 		if err := validateProbeURL(in.DestinationURL); err != nil {
 			checks = without(checks, CheckHTTPRequest)
@@ -153,4 +157,22 @@ func wants(checks []string, name string) bool {
 		}
 	}
 	return false
+}
+
+func filterChecksForDestination(destType string, checks []string) []string {
+	switch destType {
+	case "localhost":
+		return withoutMany(checks, CheckServiceResolution, CheckEndpointHealth, CheckNetworkPolicy)
+	case "external_dns", "external_ip":
+		return withoutMany(checks, CheckServiceResolution, CheckEndpointHealth, CheckNetworkPolicy)
+	default:
+		return checks
+	}
+}
+
+func withoutMany(in []string, drops ...string) []string {
+	for _, drop := range drops {
+		in = without(in, drop)
+	}
+	return in
 }

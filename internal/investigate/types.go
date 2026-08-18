@@ -34,6 +34,7 @@ type Intent struct {
 	SourcePod         string    `json:"sourcePod,omitempty"`
 	Destination       string    `json:"destination"`
 	DestinationURL    string    `json:"destinationUrl,omitempty"`
+	DestinationType   string    `json:"destinationType,omitempty"`
 	RecordedHTTP      int       `json:"recordedHttp,omitempty"`
 	Checks            []string  `json:"checks"`
 	MaxLevel          int       `json:"maxLevel"`
@@ -58,6 +59,8 @@ type Result struct {
 	LevelReached int           `json:"levelReached"`
 	SkipReason   string        `json:"skipReason,omitempty"`
 	Inference    string        `json:"inference,omitempty"`
+	OriginalState string       `json:"originalState,omitempty"`
+	CurrentState  string       `json:"currentState,omitempty"`
 	Confidence   string        `json:"confidence,omitempty"`
 	Observations []Observation `json:"observations,omitempty"`
 	DurationMs   int64         `json:"durationMs,omitempty"`

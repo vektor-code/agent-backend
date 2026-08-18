@@ -81,6 +81,9 @@ func (e *Executor) execute(ctx context.Context, in Intent) Result {
 	defer cancel()
 
 	host, _ := splitHostPort(in.Destination)
+	if msg := destinationContextMessage(in.DestinationType, in.Destination); msg != "" {
+		res.Observations = append(res.Observations, observed("destination_context", msg, 1, true, ""))
+	}
 	if wants(admitted.Checks, CheckPodStatus) || wants(admitted.Checks, CheckEvents) {
 		res.Observations = append(res.Observations, e.level1Pod(ctx, in, host)...)
 		res.LevelReached = max(res.LevelReached, 1)
@@ -101,7 +104,7 @@ func (e *Executor) execute(ctx context.Context, in Intent) Result {
 		}
 	}
 
-	res.Inference, res.Confidence = conclude(in, res.Observations)
+	res.OriginalState, res.CurrentState, res.Inference, res.Confidence = conclude(in, res.Observations)
 	if res.Inference != "" {
 		res.Observations = append(res.Observations, inference("conclusion", res.Inference))
 	}
@@ -215,7 +218,10 @@ func (e *Executor) httpRequest(ctx context.Context, in Intent, maxLevel int) (*O
 	} else {
 		if status > 0 {
 			detail += fmt.Sprintf("; request from %s returned HTTP %d", pod.Name, status)
-			ok = in.RecordedHTTP == 0 || status == in.RecordedHTTP || (in.RecordedHTTP >= 500 && status >= 500)
+			ok = in.RecordedHTTP > 0 && (status == in.RecordedHTTP || (in.RecordedHTTP >= 500 && status >= 500))
+			if !ok {
+				detail += "; replay fidelity: PARTIAL"
+			}
 		} else if res != nil {
 			snippet := strings.TrimSpace(res.Stdout + " " + res.Stderr)
 			if len(snippet) > 240 {
@@ -249,7 +255,7 @@ func (e *Executor) probePod(ctx context.Context, in Intent, maxLevel int) (*PodV
 	return nil, 1, "exec skipped: no running source pod in " + in.Namespace
 }
 
-func conclude(in Intent, obs []Observation) (string, string) {
+func conclude(in Intent, obs []Observation) (string, string, string, string) {
 	var probe *Observation
 	var ready *Observation
 	for i := range obs {
@@ -264,21 +270,22 @@ func conclude(in Intent, obs []Observation) (string, string) {
 			ready = o
 		}
 	}
+	original := originalStateFor(in)
 	if probe != nil && probe.OK != nil && *probe.OK && in.InvestigationType == TypeDownstreamHTTPFailure {
-		return "backend is likely responsible", "HIGH"
+		return original, "REPRODUCED", "The live retry reproduced the recorded HTTP failure from the same workload context", "HIGH"
 	}
 	if probe != nil && probe.OK != nil && !*probe.OK && strings.Contains(probe.Message, "returned HTTP") {
-		return "A live request from the source workload did not reproduce the recorded HTTP status; the failure may be transient", "MEDIUM"
+		return original, "NOT REPRODUCED", "The original request experienced a transport-level or upstream failure. A live retry from the same source pod returned a different HTTP response, so the failure was not reproduced at investigation time", "MEDIUM"
 	}
 	// If we only inspected readiness/state (no HTTP probe), we should not over-interpret.
 	// Observed state can explain availability, but it does not prove the request outcome.
 	if probe == nil && ready != nil && ready.OK != nil && *ready.OK {
-		return "Target workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
+		return original, "NOT VERIFIED", "Target workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
 	}
 	if ready != nil && ready.OK != nil && !*ready.OK {
-		return "The target pod is not Ready; infrastructure state may explain the recorded failure", "MEDIUM"
+		return original, "CURRENTLY DEGRADED", "The target pod is not Ready; infrastructure state may explain the recorded failure", "MEDIUM"
 	}
-	return "Live Kubernetes inspection completed; see observed evidence", "LOW"
+	return original, "INCONCLUSIVE", "Live verification completed; see observed evidence", "LOW"
 }
 
 func anyObservedOK(obs []Observation) bool {
@@ -313,6 +320,32 @@ func isLocalhostTarget(host string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func destinationContextMessage(destType, destination string) string {
+	switch destType {
+	case "localhost":
+		return "Target is local to the same pod/network namespace; Kubernetes Service mapping is not applicable"
+	case "external_dns":
+		return "Target is external: " + destination
+	case "external_ip":
+		return "Target is an external IP: " + destination
+	default:
+		return ""
+	}
+}
+
+func originalStateFor(in Intent) string {
+	switch in.InvestigationType {
+	case TypeNetworkTimeout:
+		return "TRANSPORT / UPSTREAM CONNECTIVITY"
+	case TypeDownstreamHTTPFailure:
+		return "APPLICATION / DOWNSTREAM HTTP FAILURE"
+	case TypeClientError:
+		return "APPLICATION-LEVEL HTTP 4xx"
+	default:
+		return "UNKNOWN"
 	}
 }
 

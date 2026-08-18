@@ -81,6 +81,7 @@ func healthzIntent() Intent {
 		SourcePod:         "gtm-preview-abc",
 		Destination:       "10.233.115.249:8080",
 		DestinationURL:    "http://10.233.115.249:8080/healthz",
+		DestinationType:   "private_ip",
 		RecordedHTTP:      503,
 		Checks:            []string{CheckPodStatus, CheckServiceResolution, CheckEndpointHealth, CheckEvents, CheckNetworkPolicy, CheckHTTPRequest},
 		MaxLevel:          3,
@@ -207,6 +208,49 @@ func TestExecutorUsesDiagnosticWorkerWhenNoSourcePod(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected level-3 reusable worker, got %+v", res.Observations)
+	}
+}
+
+func TestExecutorExternalTargetSkipsServiceChecksAndMarksNotReproduced(t *testing.T) {
+	pod := &PodView{Name: "reverse-proxy-abc", Namespace: "highping-client", Phase: "Running", Ready: true, Workload: "reverse-proxy", Container: "proxy"}
+	fake := &fakeCluster{
+		pods: map[string]*PodView{"highping-client/reverse-proxy-abc": pod},
+		execOut: &ExecResult{Stdout: "HTTP/1.1 400 Bad Request\n"},
+	}
+	ex := NewExecutor(fake, func(string) bool { return true }, "crnet-apm")
+	in := Intent{
+		InvestigationType: TypeNetworkTimeout,
+		ClusterID:         "crtnet-ext-k8s",
+		Namespace:         "highping-client",
+		SourceWorkload:    "reverse-proxy",
+		SourcePod:         "reverse-proxy-abc",
+		Destination:       "sgtm.superead.com:56388",
+		DestinationURL:    "http://sgtm.superead.com:56388/g/collect",
+		DestinationType:   "external_dns",
+		RecordedHTTP:      0,
+		Checks:            []string{CheckPodStatus, CheckServiceResolution, CheckEndpointHealth, CheckNetworkPolicy, CheckHTTPRequest},
+		MaxLevel:          3,
+		TraceID:           "t-ext",
+		Fingerprint:       "fp-ext",
+	}
+	res := ex.Run(context.Background(), in)
+	if res.CurrentState != "NOT REPRODUCED" {
+		t.Fatalf("current=%q", res.CurrentState)
+	}
+	if res.OriginalState != "TRANSPORT / UPSTREAM CONNECTIVITY" {
+		t.Fatalf("original=%q", res.OriginalState)
+	}
+	foundExternal := false
+	for _, o := range res.Observations {
+		if o.Code == "destination_context" && strings.Contains(o.Message, "Target is external") {
+			foundExternal = true
+		}
+		if o.Code == "service_resolution" || o.Code == "endpoint_health" || o.Code == "network_policy" {
+			t.Fatalf("external destination should skip kubernetes service checks: %+v", res.Observations)
+		}
+	}
+	if !foundExternal {
+		t.Fatalf("missing external target observation: %+v", res.Observations)
 	}
 }
 
