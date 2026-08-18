@@ -124,7 +124,8 @@ func (e *Executor) level1Pod(ctx context.Context, in Intent, host string) []Obse
 		out = append(out, observed("pod_status", "Could not map "+in.Destination+" to a pod in "+in.Namespace, 1, false, ""))
 		return out
 	}
-	detail := fmt.Sprintf("Pod %s on node %s is %s, Ready=%v, restarts=%d", destPod.Name, destPod.Node, destPod.Phase, destPod.Ready, destPod.Restarts)
+	// Avoid using historical restart counts as evidence for a specific request time.
+	detail := fmt.Sprintf("Pod %s on node %s is %s, Ready=%v", destPod.Name, destPod.Node, destPod.Phase, destPod.Ready)
 	out = append(out, observed("pod_status", detail, 1, destPod.Ready, destPod.Name))
 	if dep, err := e.cluster.FindDeployment(ctx, in.Namespace, destPod.Workload); err == nil && dep != nil {
 		ok := dep.Ready > 0
@@ -140,6 +141,10 @@ func (e *Executor) level1Pod(ctx context.Context, in Intent, host string) []Obse
 
 func (e *Executor) level1Service(ctx context.Context, in Intent, host string) []Observation {
 	var out []Observation
+	if isLocalhostTarget(host) {
+		out = append(out, observed("context_local_target", "Target host is localhost; Kubernetes Service mapping is not applicable", 1, true, ""))
+		return out
+	}
 	svc, _ := e.cluster.FindServiceByIP(ctx, in.Namespace, host)
 	if svc == nil {
 		if pod, _ := e.cluster.FindPodByIP(ctx, in.Namespace, host); pod != nil {
@@ -265,8 +270,10 @@ func conclude(in Intent, obs []Observation) (string, string) {
 	if probe != nil && probe.OK != nil && !*probe.OK && strings.Contains(probe.Message, "returned HTTP") {
 		return "A live request from the source workload did not reproduce the recorded HTTP status; the failure may be transient", "MEDIUM"
 	}
-	if ready != nil && ready.OK != nil && *ready.OK {
-		return "The target workload is Ready; the recorded failure is consistent with application-level behavior rather than a missing endpoint", "MEDIUM"
+	// If we only inspected readiness/state (no HTTP probe), we should not over-interpret.
+	// Observed state can explain availability, but it does not prove the request outcome.
+	if probe == nil && ready != nil && ready.OK != nil && *ready.OK {
+		return "Target workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
 	}
 	if ready != nil && ready.OK != nil && !*ready.OK {
 		return "The target pod is not Ready; infrastructure state may explain the recorded failure", "MEDIUM"
@@ -298,6 +305,15 @@ func splitHostPort(dest string) (string, string) {
 		return dest, ""
 	}
 	return host, port
+}
+
+func isLocalhostTarget(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 var httpStatusRe = regexp.MustCompile(`(?i)HTTP/[0-9.]+ (\d{3})|HTTP_STATUS\s+(\d{3})`)
