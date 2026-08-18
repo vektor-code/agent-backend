@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,9 +15,12 @@ type fakeCluster struct {
 	byIP      map[string]*PodView
 	svcByIP   map[string]*ServiceView
 	endpoints map[string]*EndpointsView
+	deps      map[string]*DeploymentView
+	events    map[string][]string
 	diagPod   *PodView
 	execOut   *ExecResult
 	execErr   error
+	execFn    func(namespace, pod, container string, argv []string) (*ExecResult, error)
 	gets      atomic.Int32
 	execs     atomic.Int32
 }
@@ -55,11 +59,17 @@ func (f *fakeCluster) GetEndpoints(_ context.Context, ns, service string) (*Endp
 	defer f.mu.Unlock()
 	return f.endpoints[ns+"/"+service], nil
 }
-func (f *fakeCluster) FindDeployment(context.Context, string, string) (*DeploymentView, error) {
-	return nil, nil
+func (f *fakeCluster) FindDeployment(_ context.Context, ns, workload string) (*DeploymentView, error) {
+	if f.deps == nil {
+		return nil, nil
+	}
+	return f.deps[ns+"/"+workload], nil
 }
-func (f *fakeCluster) ListWarningEvents(context.Context, string, string) ([]string, error) {
-	return nil, nil
+func (f *fakeCluster) ListWarningEvents(_ context.Context, ns, pod string) ([]string, error) {
+	if f.events == nil {
+		return nil, nil
+	}
+	return f.events[ns+"/"+pod], nil
 }
 func (f *fakeCluster) ListNetworkPolicies(context.Context, string) ([]NetworkPolicyView, error) {
 	return nil, nil
@@ -67,8 +77,11 @@ func (f *fakeCluster) ListNetworkPolicies(context.Context, string) ([]NetworkPol
 func (f *fakeCluster) FindDiagnosticPod(context.Context, string) (*PodView, error) {
 	return f.diagPod, nil
 }
-func (f *fakeCluster) Exec(context.Context, string, string, string, []string) (*ExecResult, error) {
+func (f *fakeCluster) Exec(_ context.Context, ns, name, container string, argv []string) (*ExecResult, error) {
 	f.execs.Add(1)
+	if f.execFn != nil {
+		return f.execFn(ns, name, container, argv)
+	}
 	return f.execOut, f.execErr
 }
 
@@ -268,6 +281,114 @@ func TestHttpProbeRejectsInjection(t *testing.T) {
 	}
 	if strings.Contains(script, "apk upgrade") || strings.Contains(script, "apt-get update") {
 		t.Fatal("probe must not upgrade packages")
+	}
+}
+
+func TestExecutorExternalSourceNotReadyNoShell(t *testing.T) {
+	pod := &PodView{
+		Name: "gtm-server-df95b5b4b-wqflv", Namespace: "highping-dev", Node: "crtnet-ext-k8s-w05",
+		Phase: "Running", Ready: false, Workload: "gtm-server", Container: "gtm-server",
+	}
+	fake := &fakeCluster{
+		pods: map[string]*PodView{"highping-dev/gtm-server-df95b5b4b-wqflv": pod},
+		deps: map[string]*DeploymentView{"highping-dev/gtm-server": {Name: "gtm-server", Desired: 1, Ready: 0}},
+		events: map[string][]string{
+			"highping-dev/gtm-server-df95b5b4b-wqflv": {
+				`Unhealthy: Readiness probe failed: Get "http://10.233.115.194:80/healthz": dial tcp 10.233.115.194:80: connect: connection refused`,
+			},
+		},
+		execErr: fmt.Errorf(`exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory: unknown`),
+	}
+	ex := NewExecutor(fake, func(string) bool { return true }, "crnet-apm")
+	in := Intent{
+		InvestigationType: TypeNetworkTimeout,
+		ClusterID:         "crtnet-ext-k8s",
+		Namespace:         "highping-dev",
+		SourceWorkload:    "gtm-server",
+		SourcePod:         "gtm-server-df95b5b4b-wqflv",
+		Destination:       "www.googletagmanager.com:443",
+		DestinationURL:    "https://www.googletagmanager.com/",
+		DestinationType:   "external_dns",
+		RecordedHTTP:      0,
+		Checks:            []string{CheckPodStatus, CheckServiceResolution, CheckEndpointHealth, CheckEvents, CheckNetworkPolicy, CheckHTTPRequest},
+		MaxLevel:          3,
+		TraceID:           "t-gtm",
+		Fingerprint:       "fp-gtm",
+	}
+	res := ex.Run(context.Background(), in)
+	if res.CurrentState != "LIVE RETRY NOT POSSIBLE" {
+		t.Fatalf("current=%q inference=%q", res.CurrentState, res.Inference)
+	}
+	if strings.Contains(strings.ToLower(res.Inference), "target pod is not ready") {
+		t.Fatalf("must not treat source pod as the external target: %q", res.Inference)
+	}
+	if !strings.Contains(res.Inference, "no /bin/sh") {
+		t.Fatalf("inference should mention missing shell: %q", res.Inference)
+	}
+	sawSource, sawDestPod, sawHTTPSkip, sawExternal := false, false, false, false
+	for _, o := range res.Observations {
+		if o.Code == "source_pod_status" && strings.Contains(o.Message, "Ready=false") {
+			sawSource = true
+		}
+		if o.Code == "pod_status" && strings.Contains(o.Message, "Pod "+pod.Name) {
+			sawDestPod = true
+		}
+		if o.Code == "http_request" && strings.Contains(o.Message, "no /bin/sh") {
+			sawHTTPSkip = true
+		}
+		if o.Code == "destination_context" && strings.Contains(o.Message, "www.googletagmanager.com:443") {
+			sawExternal = true
+		}
+		if o.Code == "service_resolution" || o.Code == "endpoint_health" || o.Code == "network_policy" {
+			t.Fatalf("external destination should skip kubernetes service checks: %+v", res.Observations)
+		}
+	}
+	if !sawSource || sawDestPod || !sawHTTPSkip || !sawExternal {
+		t.Fatalf("source=%v destPod=%v skip=%v external=%v obs=%+v", sawSource, sawDestPod, sawHTTPSkip, sawExternal, res.Observations)
+	}
+}
+
+func TestExecutorNoShellFallsBackToDiagnosticWorker(t *testing.T) {
+	src := &PodView{Name: "gtm-server-a", Namespace: "highping-dev", Phase: "Running", Ready: true, Workload: "gtm-server", Container: "gtm"}
+	worker := &PodView{Name: "crnet-diag-0", Namespace: "highping-dev", Phase: "Running", Ready: true, Workload: "crnet-diagnostics", Container: "diag"}
+	fake := &fakeCluster{
+		pods:    map[string]*PodView{"highping-dev/gtm-server-a": src},
+		diagPod: worker,
+		execFn: func(_, name, _ string, _ []string) (*ExecResult, error) {
+			if name == "gtm-server-a" {
+				return nil, fmt.Errorf(`exec: "/bin/sh": stat /bin/sh: no such file or directory`)
+			}
+			return &ExecResult{Stdout: "HTTP/1.1 200 OK\n"}, nil
+		},
+	}
+	ex := NewExecutor(fake, func(string) bool { return true }, "crnet-apm")
+	in := Intent{
+		InvestigationType: TypeNetworkTimeout,
+		Namespace:         "highping-dev",
+		SourceWorkload:    "gtm-server",
+		SourcePod:         "gtm-server-a",
+		Destination:       "www.googletagmanager.com:443",
+		DestinationURL:    "https://www.googletagmanager.com/",
+		DestinationType:   "external_dns",
+		Checks:            []string{CheckPodStatus, CheckHTTPRequest},
+		MaxLevel:          3,
+		Fingerprint:       "fp-noshell-worker",
+	}
+	res := ex.Run(context.Background(), in)
+	if fake.execs.Load() < 2 {
+		t.Fatalf("expected source exec then worker exec, got %d", fake.execs.Load())
+	}
+	if res.CurrentState != "NOT REPRODUCED" {
+		t.Fatalf("current=%q inference=%q", res.CurrentState, res.Inference)
+	}
+	found := false
+	for _, o := range res.Observations {
+		if o.Code == "http_request" && strings.Contains(o.Message, "diagnostic worker") && strings.Contains(o.Message, "HTTP 200") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected worker probe after missing shell, got %+v", res.Observations)
 	}
 }
 

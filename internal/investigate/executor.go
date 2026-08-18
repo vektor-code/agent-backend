@@ -116,27 +116,45 @@ func (e *Executor) execute(ctx context.Context, in Intent) Result {
 }
 
 func (e *Executor) level1Pod(ctx context.Context, in Intent, host string) []Observation {
+	if destIsExternalOrLocal(in.DestinationType, host) {
+		return e.sourcePodStatus(ctx, in)
+	}
 	var out []Observation
 	destPod, _ := e.cluster.FindPodByIP(ctx, in.Namespace, host)
-	if destPod == nil && in.SourcePod != "" {
-		if p, err := e.cluster.GetPod(ctx, in.Namespace, in.SourcePod); err == nil {
-			destPod = p
+	if destPod != nil {
+		out = append(out, e.podFacts(ctx, in, destPod, "pod_status", "Pod")...)
+		if in.SourcePod != "" && in.SourcePod != destPod.Name {
+			out = append(out, e.sourcePodStatus(ctx, in)...)
 		}
-	}
-	if destPod == nil {
-		out = append(out, observed("pod_status", "Could not map "+in.Destination+" to a pod in "+in.Namespace, 1, false, ""))
 		return out
 	}
-	// Avoid using historical restart counts as evidence for a specific request time.
-	detail := fmt.Sprintf("Pod %s on node %s is %s, Ready=%v", destPod.Name, destPod.Node, destPod.Phase, destPod.Ready)
-	out = append(out, observed("pod_status", detail, 1, destPod.Ready, destPod.Name))
-	if dep, err := e.cluster.FindDeployment(ctx, in.Namespace, destPod.Workload); err == nil && dep != nil {
+	out = append(out, observed("dest_unmapped", "Could not map "+in.Destination+" to a destination pod in "+in.Namespace, 1, false, ""))
+	out = append(out, e.sourcePodStatus(ctx, in)...)
+	return out
+}
+
+func (e *Executor) sourcePodStatus(ctx context.Context, in Intent) []Observation {
+	if in.SourcePod == "" {
+		return nil
+	}
+	p, err := e.cluster.GetPod(ctx, in.Namespace, in.SourcePod)
+	if err != nil || p == nil {
+		return []Observation{observed("source_pod_status", "Source pod "+in.SourcePod+" was not found in "+in.Namespace, 1, false, in.SourcePod)}
+	}
+	return e.podFacts(ctx, in, p, "source_pod_status", "Source pod")
+}
+
+func (e *Executor) podFacts(ctx context.Context, in Intent, pod *PodView, code, label string) []Observation {
+	var out []Observation
+	detail := fmt.Sprintf("%s %s on node %s is %s, Ready=%v", label, pod.Name, pod.Node, pod.Phase, pod.Ready)
+	out = append(out, observed(code, detail, 1, pod.Ready, pod.Name))
+	if dep, err := e.cluster.FindDeployment(ctx, in.Namespace, pod.Workload); err == nil && dep != nil {
 		ok := dep.Ready > 0
-		out = append(out, observed("deployment_status", fmt.Sprintf("Deployment %s Ready %d/%d", dep.Name, dep.Ready, dep.Desired), 1, ok, destPod.Name))
+		out = append(out, observed("deployment_status", fmt.Sprintf("%s deployment %s Ready %d/%d", label, dep.Name, dep.Ready, dep.Desired), 1, ok, pod.Name))
 	}
 	if wants(in.Checks, CheckEvents) {
-		if ev, err := e.cluster.ListWarningEvents(ctx, destPod.Namespace, destPod.Name); err == nil && len(ev) > 0 {
-			out = append(out, observed("events", "Recent warnings: "+strings.Join(ev, "; "), 1, false, destPod.Name))
+		if ev, err := e.cluster.ListWarningEvents(ctx, pod.Namespace, pod.Name); err == nil && len(ev) > 0 {
+			out = append(out, observed("events", "Recent warnings: "+strings.Join(ev, "; "), 1, false, pod.Name))
 		}
 	}
 	return out
@@ -201,15 +219,37 @@ func (e *Executor) httpRequest(ctx context.Context, in Intent, maxLevel int) (*O
 		obs := observed("http_request", how, 2, false, "")
 		return &obs, 1
 	}
+	obs, skippedNoShell := e.execProbe(ctx, in, pod, level, how, cmd)
+	if skippedNoShell && maxLevel >= 3 && (pod.Labels == nil || pod.Labels["app"] != "crnet-diagnostics") {
+		if worker, err := e.cluster.FindDiagnosticPod(ctx, in.Namespace); err == nil && worker != nil && worker.Name != pod.Name {
+			wobs, wSkip := e.execProbe(ctx, in, worker, 3, "source container has no /bin/sh; reused diagnostic worker "+worker.Name, cmd)
+			if !wSkip && wobs != nil {
+				return wobs, 3
+			}
+		}
+		skip := observed("http_request", "Live HTTP probe skipped: container has no /bin/sh", 2, false, pod.Name)
+		return &skip, 2
+	}
+	if skippedNoShell {
+		skip := observed("http_request", "Live HTTP probe skipped: container has no /bin/sh", level, false, pod.Name)
+		return &skip, level
+	}
+	return obs, level
+}
+
+func (e *Executor) execProbe(ctx context.Context, in Intent, pod *PodView, level int, how string, cmd []string) (*Observation, bool) {
 	if level >= 3 {
 		release, ok := e.limit.acquireWorker(in.Namespace)
 		if !ok {
 			obs := observed("http_request", "exec skipped: diagnostic worker already in use in "+in.Namespace, 2, false, "")
-			return &obs, 1
+			return &obs, false
 		}
 		defer release()
 	}
 	res, execErr := e.cluster.Exec(ctx, pod.Namespace, pod.Name, pod.Container, cmd)
+	if noShellExec(execErr, res) {
+		return nil, true
+	}
 	detail := how
 	status := parseHTTPStatus(res)
 	ok := false
@@ -234,7 +274,7 @@ func (e *Executor) httpRequest(ctx context.Context, in Intent, maxLevel int) (*O
 		}
 	}
 	obs := observed("http_request", detail, level, ok, pod.Name)
-	return &obs, level
+	return &obs, false
 }
 
 func (e *Executor) probePod(ctx context.Context, in Intent, maxLevel int) (*PodView, int, string) {
@@ -257,17 +297,20 @@ func (e *Executor) probePod(ctx context.Context, in Intent, maxLevel int) (*PodV
 
 func conclude(in Intent, obs []Observation) (string, string, string, string) {
 	var probe *Observation
-	var ready *Observation
+	var destReady *Observation
+	var sourceReady *Observation
 	for i := range obs {
 		o := &obs[i]
 		if o.Kind != KindObserved {
 			continue
 		}
-		if o.Code == "http_request" {
+		switch o.Code {
+		case "http_request":
 			probe = o
-		}
-		if o.Code == "pod_status" {
-			ready = o
+		case "pod_status":
+			destReady = o
+		case "source_pod_status":
+			sourceReady = o
 		}
 	}
 	original := originalStateFor(in)
@@ -275,17 +318,72 @@ func conclude(in Intent, obs []Observation) (string, string, string, string) {
 		return original, "REPRODUCED", "The live retry reproduced the recorded HTTP failure from the same workload context", "HIGH"
 	}
 	if probe != nil && probe.OK != nil && !*probe.OK && strings.Contains(probe.Message, "returned HTTP") {
-		return original, "NOT REPRODUCED", "The original request experienced a transport-level or upstream failure. A live retry from the same source pod returned a different HTTP response, so the failure was not reproduced at investigation time", "MEDIUM"
+		msg := "The original request experienced a transport-level or upstream failure. A live retry from the same source pod returned a different HTTP response, so the failure was not reproduced at investigation time"
+		if strings.Contains(probe.Message, "diagnostic worker") {
+			msg = "A live retry from a diagnostic worker returned an HTTP response. That does not replay the original source-container path, so the recorded failure was not reproduced"
+		}
+		return original, "NOT REPRODUCED", msg, "MEDIUM"
 	}
-	// If we only inspected readiness/state (no HTTP probe), we should not over-interpret.
-	// Observed state can explain availability, but it does not prove the request outcome.
-	if probe == nil && ready != nil && ready.OK != nil && *ready.OK {
-		return original, "NOT VERIFIED", "Target workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
+	if probeSkippedNoShell(probe) {
+		inf := "Live HTTP probe could not run because the source container has no /bin/sh. Original classification is unchanged"
+		if sourceNotReady(sourceReady) {
+			inf += ". The source pod is currently not Ready; that is live source state and does not by itself explain the recorded external upstream failure"
+		}
+		return original, "LIVE RETRY NOT POSSIBLE", inf, "MEDIUM"
 	}
-	if ready != nil && ready.OK != nil && !*ready.OK {
-		return original, "CURRENTLY DEGRADED", "The target pod is not Ready; infrastructure state may explain the recorded failure", "MEDIUM"
+	if destReady != nil && destReady.OK != nil && !*destReady.OK && strings.Contains(destReady.Message, "Ready=") {
+		return original, "CURRENTLY DEGRADED", "The destination pod is not Ready; infrastructure state may explain the recorded failure", "MEDIUM"
+	}
+	if destIsExternalOrLocal(in.DestinationType, "") && sourceNotReady(sourceReady) {
+		return original, "SOURCE NOT READY", "The source pod is currently not Ready. That is live source state and does not by itself prove the external destination failed", "MEDIUM"
+	}
+	if probe == nil && destReady != nil && destReady.OK != nil && *destReady.OK {
+		return original, "NOT VERIFIED", "Destination workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
+	}
+	if probe == nil && sourceReady != nil && sourceReady.OK != nil && *sourceReady.OK {
+		return original, "NOT VERIFIED", "Source workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
 	}
 	return original, "INCONCLUSIVE", "Live verification completed; see observed evidence", "LOW"
+}
+
+func probeSkippedNoShell(probe *Observation) bool {
+	if probe == nil {
+		return false
+	}
+	msg := strings.ToLower(probe.Message)
+	return strings.Contains(msg, "no /bin/sh") || strings.Contains(msg, "container has no /bin/sh")
+}
+
+func sourceNotReady(o *Observation) bool {
+	return o != nil && o.OK != nil && !*o.OK
+}
+
+func destIsExternalOrLocal(destType, host string) bool {
+	switch destType {
+	case "localhost", "external_dns", "external_ip":
+		return true
+	}
+	return isLocalhostTarget(host)
+}
+
+func noShellExec(err error, res *ExecResult) bool {
+	var b strings.Builder
+	if err != nil {
+		b.WriteString(err.Error())
+	}
+	if res != nil {
+		b.WriteString(res.Stdout)
+		b.WriteString(" ")
+		b.WriteString(res.Stderr)
+	}
+	s := strings.ToLower(b.String())
+	if strings.Contains(s, "/bin/sh") && (strings.Contains(s, "no such file") || strings.Contains(s, "executable file not found") || strings.Contains(s, "stat /bin/sh")) {
+		return true
+	}
+	if strings.Contains(s, "/bin/bash") && strings.Contains(s, "no such file") {
+		return true
+	}
+	return false
 }
 
 func anyObservedOK(obs []Observation) bool {
