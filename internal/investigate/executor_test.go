@@ -247,15 +247,15 @@ func TestExecutorExternalTargetSkipsServiceChecksAndMarksNotReproduced(t *testin
 		Fingerprint:       "fp-ext",
 	}
 	res := ex.Run(context.Background(), in)
-	if res.CurrentState != "NOT REPRODUCED" {
+	if res.CurrentState != "Not reproduced" {
 		t.Fatalf("current=%q", res.CurrentState)
 	}
-	if res.OriginalState != "TRANSPORT / UPSTREAM CONNECTIVITY" {
+	if res.OriginalState != "Transport / upstream connectivity" {
 		t.Fatalf("original=%q", res.OriginalState)
 	}
 	foundExternal := false
 	for _, o := range res.Observations {
-		if o.Code == "destination_context" && strings.Contains(o.Message, "Target is external") {
+		if o.Code == "destination_context" && strings.Contains(o.Message, "outside the cluster") {
 			foundExternal = true
 		}
 		if o.Code == "service_resolution" || o.Code == "endpoint_health" || o.Code == "network_policy" {
@@ -334,12 +334,12 @@ func TestExecutorNoShellUsesNode(t *testing.T) {
 		Fingerprint:       "fp-node-probe",
 	}
 	res := ex.Run(context.Background(), in)
-	if res.CurrentState != "NOT REPRODUCED" {
+	if res.CurrentState != "Not reproduced" {
 		t.Fatalf("current=%q inference=%q obs=%+v", res.CurrentState, res.Inference, res.Observations)
 	}
 	found := false
 	for _, o := range res.Observations {
-		if o.Code == "http_request" && strings.Contains(o.Message, "probed via /nodejs/bin/node") && strings.Contains(o.Message, "HTTP 404") {
+		if o.Code == "http_request" && strings.Contains(o.Message, "HTTP 404") {
 			found = true
 		}
 	}
@@ -380,7 +380,7 @@ func TestExecutorExternalSourceNotReadyNoShell(t *testing.T) {
 		Fingerprint:       "fp-gtm",
 	}
 	res := ex.Run(context.Background(), in)
-	if res.CurrentState != "LIVE RETRY NOT POSSIBLE" {
+	if res.CurrentState != "Live retry not possible" {
 		t.Fatalf("current=%q inference=%q", res.CurrentState, res.Inference)
 	}
 	if strings.Contains(strings.ToLower(res.Inference), "target pod is not ready") {
@@ -442,7 +442,7 @@ func TestExecutorNoShellFallsBackToDiagnosticWorker(t *testing.T) {
 	if fake.execs.Load() < 2 {
 		t.Fatalf("expected source exec then worker exec, got %d", fake.execs.Load())
 	}
-	if res.CurrentState != "NOT REPRODUCED" {
+	if res.CurrentState != "Not reproduced" {
 		t.Fatalf("current=%q inference=%q", res.CurrentState, res.Inference)
 	}
 	found := false

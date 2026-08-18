@@ -146,11 +146,11 @@ func (e *Executor) sourcePodStatus(ctx context.Context, in Intent) []Observation
 
 func (e *Executor) podFacts(ctx context.Context, in Intent, pod *PodView, code, label string) []Observation {
 	var out []Observation
-	detail := fmt.Sprintf("%s %s on node %s is %s, Ready=%v", label, pod.Name, pod.Node, pod.Phase, pod.Ready)
+	detail := fmt.Sprintf("%s %s is %s on %s (Ready=%v)", label, pod.Name, pod.Phase, pod.Node, pod.Ready)
 	out = append(out, observed(code, detail, 1, pod.Ready, pod.Name))
 	if dep, err := e.cluster.FindDeployment(ctx, in.Namespace, pod.Workload); err == nil && dep != nil {
 		ok := dep.Ready > 0
-		out = append(out, observed("deployment_status", fmt.Sprintf("%s deployment %s Ready %d/%d", label, dep.Name, dep.Ready, dep.Desired), 1, ok, pod.Name))
+		out = append(out, observed("deployment_status", fmt.Sprintf("Deployment %s is Ready %d/%d", dep.Name, dep.Ready, dep.Desired), 1, ok, pod.Name))
 	}
 	if wants(in.Checks, CheckEvents) {
 		if ev, err := e.cluster.ListWarningEvents(ctx, pod.Namespace, pod.Name); err == nil && len(ev) > 0 {
@@ -163,7 +163,7 @@ func (e *Executor) podFacts(ctx context.Context, in Intent, pod *PodView, code, 
 func (e *Executor) level1Service(ctx context.Context, in Intent, host string) []Observation {
 	var out []Observation
 	if isLocalhostTarget(host) {
-		out = append(out, observed("context_local_target", "Target host is localhost; Kubernetes Service mapping is not applicable", 1, true, ""))
+		out = append(out, observed("context_local_target", "This call stayed inside the same pod, so Kubernetes Service mapping does not apply", 1, true, ""))
 		return out
 	}
 	svc, _ := e.cluster.FindServiceByIP(ctx, in.Namespace, host)
@@ -236,12 +236,8 @@ func (e *Executor) httpRequest(ctx context.Context, in Intent, maxLevel int) (*O
 }
 
 func (e *Executor) runProbeCommands(ctx context.Context, in Intent, pod *PodView, level int, how string, cmds [][]string) (*Observation, bool) {
-	for i, cmd := range cmds {
-		label := how
-		if i > 0 && len(cmd) > 0 {
-			label = how + "; probed via " + cmd[0]
-		}
-		obs, missing := e.execProbe(ctx, in, pod, level, label, cmd)
+	for _, cmd := range cmds {
+		obs, missing := e.execProbe(ctx, in, pod, level, how, cmd)
 		if missing {
 			continue
 		}
@@ -254,7 +250,7 @@ func (e *Executor) execProbe(ctx context.Context, in Intent, pod *PodView, level
 	if level >= 3 {
 		release, ok := e.limit.acquireWorker(in.Namespace)
 		if !ok {
-			obs := observed("http_request", "exec skipped: diagnostic worker already in use in "+in.Namespace, 2, false, "")
+			obs := observed("http_request", "Live retry skipped: diagnostic worker already in use in "+in.Namespace, 2, false, "")
 			return &obs, false
 		}
 		defer release()
@@ -263,27 +259,37 @@ func (e *Executor) execProbe(ctx context.Context, in Intent, pod *PodView, level
 	if missingExecBinary(execErr, res) {
 		return nil, true
 	}
-	detail := how
+	from := "source pod " + pod.Name
+	if strings.Contains(how, "diagnostic worker") {
+		from = "diagnostic worker " + pod.Name
+	}
+	target := in.Destination
+	detail := "Live retry from " + from
+	if target != "" {
+		detail += " to " + target
+	}
 	status := parseHTTPStatus(res)
 	ok := false
 	if execErr != nil && (res == nil || strings.TrimSpace(res.Stdout+res.Stderr) == "") {
-		detail += "; exec failed: " + execErr.Error()
-	} else {
-		if status > 0 {
-			detail += fmt.Sprintf("; request from %s returned HTTP %d", pod.Name, status)
-			ok = in.RecordedHTTP > 0 && (status == in.RecordedHTTP || (in.RecordedHTTP >= 500 && status >= 500))
-			if !ok {
-				detail += "; replay fidelity: PARTIAL"
+		detail += " failed: " + execErr.Error()
+	} else if status > 0 {
+		detail += fmt.Sprintf(" returned HTTP %d", status)
+		ok = in.RecordedHTTP > 0 && (status == in.RecordedHTTP || (in.RecordedHTTP >= 500 && status >= 500))
+		if !ok {
+			if in.RecordedHTTP > 0 {
+				detail += fmt.Sprintf(" (recorded failure was HTTP %d)", in.RecordedHTTP)
+			} else {
+				detail += " (did not match the recorded transport failure)"
 			}
-		} else if res != nil {
-			snippet := strings.TrimSpace(res.Stdout + " " + res.Stderr)
-			if len(snippet) > 240 {
-				snippet = snippet[:240]
-			}
-			detail += "; probe output: " + snippet
 		}
-		if res != nil && strings.Contains(res.Stdout+res.Stderr, "PROBE_INSTALLED") {
-			detail += "; ephemeral wget was installed for the check and removed afterward"
+	} else if res != nil {
+		snippet := strings.TrimSpace(res.Stdout + " " + res.Stderr)
+		if len(snippet) > 240 {
+			snippet = snippet[:240]
+		}
+		detail += "; probe output: " + snippet
+		if strings.Contains(res.Stdout+res.Stderr, "PROBE_INSTALLED") {
+			detail += "; an ephemeral client was installed for the check and removed afterward"
 		}
 	}
 	obs := observed("http_request", detail, level, ok, pod.Name)
@@ -293,19 +299,19 @@ func (e *Executor) execProbe(ctx context.Context, in Intent, pod *PodView, level
 func (e *Executor) probePod(ctx context.Context, in Intent, maxLevel int) (*PodView, int, string) {
 	if in.SourcePod != "" {
 		if p, err := e.cluster.GetPod(ctx, in.Namespace, in.SourcePod); err == nil && p != nil && p.Phase == "Running" && !p.Deleting && !isAgentWorkload(p.Name) && !isAgentWorkload(p.Workload) {
-			return p, 2, "exec into existing source pod " + p.Name
+			return p, 2, "source pod " + p.Name
 		}
 	}
 	if pods, err := e.cluster.FindRunningPods(ctx, in.Namespace, in.SourceWorkload); err == nil && len(pods) > 0 {
-		return pods[0], 2, "exec into existing " + in.SourceWorkload + " pod " + pods[0].Name
+		return pods[0], 2, "source pod " + pods[0].Name
 	}
 	if maxLevel >= 3 {
 		if d, err := e.cluster.FindDiagnosticPod(ctx, in.Namespace); err == nil && d != nil {
 			return d, 3, "no application pod available; reused diagnostic worker " + d.Name + " in " + in.Namespace
 		}
-		return nil, 1, "exec skipped: no running source pod and no reusable diagnostic worker in " + in.Namespace
+		return nil, 1, "Live retry skipped: no running source pod and no reusable diagnostic worker in " + in.Namespace
 	}
-	return nil, 1, "exec skipped: no running source pod in " + in.Namespace
+	return nil, 1, "Live retry skipped: no running source pod in " + in.Namespace
 }
 
 func conclude(in Intent, obs []Observation) (string, string, string, string) {
@@ -328,35 +334,35 @@ func conclude(in Intent, obs []Observation) (string, string, string, string) {
 	}
 	original := originalStateFor(in)
 	if probe != nil && probe.OK != nil && *probe.OK && in.InvestigationType == TypeDownstreamHTTPFailure {
-		return original, "REPRODUCED", "The live retry reproduced the recorded HTTP failure from the same workload context", "HIGH"
+		return original, "Reproduced", "The live retry reproduced the recorded HTTP failure from the same workload context", "HIGH"
 	}
 	if probe != nil && probe.OK != nil && !*probe.OK && strings.Contains(probe.Message, "returned HTTP") {
 		msg := "The original request experienced a transport-level or upstream failure. A live retry from the same source pod returned a different HTTP response, so the failure was not reproduced at investigation time"
 		if strings.Contains(probe.Message, "diagnostic worker") {
 			msg = "A live retry from a diagnostic worker returned an HTTP response. That does not replay the original source-container path, so the recorded failure was not reproduced"
 		}
-		return original, "NOT REPRODUCED", msg, "MEDIUM"
+		return original, "Not reproduced", msg, "MEDIUM"
 	}
 	if probeSkippedNoClient(probe) {
 		inf := "Live HTTP probe could not run because the source container has no /bin/sh and no usable HTTP client. Original classification is unchanged"
 		if sourceNotReady(sourceReady) {
 			inf += ". The source pod is currently not Ready; that is live source state and does not by itself explain the recorded external upstream failure"
 		}
-		return original, "LIVE RETRY NOT POSSIBLE", inf, "MEDIUM"
+		return original, "Live retry not possible", inf, "MEDIUM"
 	}
 	if destReady != nil && destReady.OK != nil && !*destReady.OK && strings.Contains(destReady.Message, "Ready=") {
-		return original, "CURRENTLY DEGRADED", "The destination pod is not Ready; infrastructure state may explain the recorded failure", "MEDIUM"
+		return original, "Currently degraded", "The destination pod is not Ready; infrastructure state may explain the recorded failure", "MEDIUM"
 	}
 	if destIsExternalOrLocal(in.DestinationType, "") && sourceNotReady(sourceReady) {
-		return original, "SOURCE NOT READY", "The source pod is currently not Ready. That is live source state and does not by itself prove the external destination failed", "MEDIUM"
+		return original, "Source not ready", "The source pod is currently not Ready. That is live source state and does not by itself prove the external destination failed", "MEDIUM"
 	}
 	if probe == nil && destReady != nil && destReady.OK != nil && *destReady.OK {
-		return original, "NOT VERIFIED", "Destination workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
+		return original, "Not verified", "Destination workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
 	}
 	if probe == nil && sourceReady != nil && sourceReady.OK != nil && *sourceReady.OK {
-		return original, "NOT VERIFIED", "Source workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
+		return original, "Not verified", "Source workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
 	}
-	return original, "INCONCLUSIVE", "Live verification completed; see observed evidence", "LOW"
+	return original, "Inconclusive", "Live verification completed; see observed evidence", "LOW"
 }
 
 func probeSkippedNoClient(probe *Observation) bool {
@@ -428,11 +434,15 @@ func isLocalhostTarget(host string) bool {
 }
 
 func destinationContextMessage(destType, destination string) string {
+	host, _ := splitHostPort(destination)
+	if destType == "localhost" && host != "" && !isLocalhostTarget(host) {
+		destType = "external_dns"
+	}
 	switch destType {
 	case "localhost":
-		return "Target is local to the same pod/network namespace; Kubernetes Service mapping is not applicable"
+		return "This call stayed inside the same pod, so Kubernetes Service mapping does not apply"
 	case "external_dns":
-		return "Target is external: " + destination
+		return "Target is outside the cluster: " + destination
 	case "external_ip":
 		return "Target is an external IP: " + destination
 	default:
@@ -443,13 +453,13 @@ func destinationContextMessage(destType, destination string) string {
 func originalStateFor(in Intent) string {
 	switch in.InvestigationType {
 	case TypeNetworkTimeout:
-		return "TRANSPORT / UPSTREAM CONNECTIVITY"
+		return "Transport / upstream connectivity"
 	case TypeDownstreamHTTPFailure:
-		return "APPLICATION / DOWNSTREAM HTTP FAILURE"
+		return "Application / downstream HTTP failure"
 	case TypeClientError:
-		return "APPLICATION-LEVEL HTTP 4xx"
+		return "Application-level HTTP 4xx"
 	default:
-		return "UNKNOWN"
+		return "Unknown"
 	}
 }
 
