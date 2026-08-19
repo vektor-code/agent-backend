@@ -19,6 +19,7 @@ type Agent struct {
 	hostMetadata     []*commonpb.KeyValue
 	client           *http.Client
 	maxHTTPBodyBytes int64
+	licenseAllowed   func() bool
 }
 
 func New(cfg Config) *Agent {
@@ -41,4 +42,15 @@ func New(cfg Config) *Agent {
 			},
 		},
 	}
+}
+
+func (a *Agent) SetLicenseGate(allowed func() bool) {
+	a.licenseAllowed = allowed
+}
+
+func (a *Agent) licenseOK() bool {
+	if a.licenseAllowed == nil {
+		return true
+	}
+	return a.licenseAllowed()
 }

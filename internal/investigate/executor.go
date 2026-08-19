@@ -11,12 +11,12 @@ import (
 )
 
 type Executor struct {
-	cluster      Cluster
-	isAppNS      func(string) bool
-	agentNS      string
-	cache        *ttlCache
-	limit        *limiter
-	flight       *flight
+	cluster Cluster
+	isAppNS func(string) bool
+	agentNS string
+	cache   *ttlCache
+	limit   *limiter
+	flight  *flight
 }
 
 func NewExecutor(cluster Cluster, isAppNS func(string) bool, agentNS string) *Executor {

@@ -9,7 +9,7 @@ import (
 	"github.com/kubetrace/agent-backend/internal/investigate"
 )
 
-func Run(ctx context.Context, centralURL string, client *http.Client) {
+func Run(ctx context.Context, centralURL string, client *http.Client, allowed func() bool) {
 	log.Println("[controller] Starting background auto-instrumentation reconciliation worker...")
 
 	clients, err := newControllerClients()
@@ -42,6 +42,9 @@ func Run(ctx context.Context, centralURL string, client *http.Client) {
 			log.Println("[controller] stopping controller loop.")
 			return
 		case <-ticker.C:
+			if allowed != nil && !allowed() {
+				continue
+			}
 			state, err := discoverClusterState(ctx, clients.kube)
 			if err != nil {
 				log.Printf("[controller] error discovering cluster state: %v", err)

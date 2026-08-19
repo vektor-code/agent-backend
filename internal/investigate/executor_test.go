@@ -227,7 +227,7 @@ func TestExecutorUsesDiagnosticWorkerWhenNoSourcePod(t *testing.T) {
 func TestExecutorExternalTargetSkipsServiceChecksAndMarksNotReproduced(t *testing.T) {
 	pod := &PodView{Name: "reverse-proxy-abc", Namespace: "highping-client", Phase: "Running", Ready: true, Workload: "reverse-proxy", Container: "proxy"}
 	fake := &fakeCluster{
-		pods: map[string]*PodView{"highping-client/reverse-proxy-abc": pod},
+		pods:    map[string]*PodView{"highping-client/reverse-proxy-abc": pod},
 		execOut: &ExecResult{Stdout: "HTTP/1.1 400 Bad Request\n"},
 	}
 	ex := NewExecutor(fake, func(string) bool { return true }, "crnet-apm")

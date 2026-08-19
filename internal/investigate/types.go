@@ -53,17 +53,17 @@ type Observation struct {
 }
 
 type Result struct {
-	Fingerprint  string        `json:"fingerprint"`
-	TraceID      string        `json:"traceId,omitempty"`
-	Status       string        `json:"status"`
-	LevelReached int           `json:"levelReached"`
-	SkipReason   string        `json:"skipReason,omitempty"`
-	Inference    string        `json:"inference,omitempty"`
-	OriginalState string       `json:"originalState,omitempty"`
-	CurrentState  string       `json:"currentState,omitempty"`
-	Confidence   string        `json:"confidence,omitempty"`
-	Observations []Observation `json:"observations,omitempty"`
-	DurationMs   int64         `json:"durationMs,omitempty"`
+	Fingerprint   string        `json:"fingerprint"`
+	TraceID       string        `json:"traceId,omitempty"`
+	Status        string        `json:"status"`
+	LevelReached  int           `json:"levelReached"`
+	SkipReason    string        `json:"skipReason,omitempty"`
+	Inference     string        `json:"inference,omitempty"`
+	OriginalState string        `json:"originalState,omitempty"`
+	CurrentState  string        `json:"currentState,omitempty"`
+	Confidence    string        `json:"confidence,omitempty"`
+	Observations  []Observation `json:"observations,omitempty"`
+	DurationMs    int64         `json:"durationMs,omitempty"`
 }
 
 func boolPtr(v bool) *bool { return &v }

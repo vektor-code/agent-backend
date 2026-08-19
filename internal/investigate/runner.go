@@ -26,10 +26,10 @@ type Config struct {
 }
 
 type Runner struct {
-	cfg      Config
-	exec     *Executor
-	jobsURL  string
-	postURL  string
+	cfg     Config
+	exec    *Executor
+	jobsURL string
+	postURL string
 }
 
 func NewRunner(cfg Config) *Runner {

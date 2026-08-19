@@ -7,5 +7,5 @@ import (
 )
 
 func (a *Agent) RunController(ctx context.Context) {
-	controller.Run(ctx, a.centralURL, a.client)
+	controller.Run(ctx, a.centralURL, a.client, a.licenseOK)
 }

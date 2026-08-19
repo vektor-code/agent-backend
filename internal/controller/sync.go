@@ -46,9 +46,9 @@ func syncNamespaceConfig(client *http.Client, url, clusterName string, namespace
 	}
 
 	var data struct {
-		Enabled         []string          `json:"enabled"`
-		Workloads       []workloadConfig  `json:"workloads"`
-		Investigations  []json.RawMessage `json:"investigations"`
+		Enabled        []string          `json:"enabled"`
+		Workloads      []workloadConfig  `json:"workloads"`
+		Investigations []json.RawMessage `json:"investigations"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, nil, nil, err

@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	agent "github.com/kubetrace/agent-backend/internal/agent"
+	"github.com/kubetrace/agent-backend/internal/license"
 	"github.com/kubetrace/agent-backend/internal/vaultenv"
 )
 
@@ -22,6 +24,16 @@ func main() {
 	cfg.Log()
 
 	service := agent.New(cfg)
+	hostname, _ := os.Hostname()
+	licenseChecker := license.New(license.Config{
+		Product:      "apm",
+		InstanceID:   hostname,
+		InstanceName: hostname,
+		Component:    "agent-backend",
+	}, slog.Default())
+	service.SetLicenseGate(licenseChecker.Allowed)
+	_ = licenseChecker.Start(context.Background())
+	defer func() { _ = licenseChecker.Stop(context.Background()) }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
