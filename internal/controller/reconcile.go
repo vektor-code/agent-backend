@@ -6,7 +6,6 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
@@ -74,34 +73,19 @@ func deleteInstrumentation(ctx context.Context, dynamicClient dynamic.Interface,
 
 // applyInstrumentation returns true when a new Instrumentation CR was created.
 func applyInstrumentation(ctx context.Context, dynamicClient dynamic.Interface, namespace, name, agentNamespace string) bool {
-	inst := &unstructured.Unstructured{
-		Object: buildInstrumentationObject(namespace, agentNamespace),
-	}
-	inst.SetName(name)
-
-	existing, err := dynamicClient.Resource(instrumentationGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return createInstrumentation(ctx, dynamicClient, namespace, inst)
-		}
+	_, err := dynamicClient.Resource(instrumentationGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	created := apierrors.IsNotFound(err)
+	if err != nil && !created {
 		log.Printf("[controller/error] failed to check instrumentation in namespace %s: %v", namespace, err)
 		return false
 	}
 
-	inst.SetResourceVersion(existing.GetResourceVersion())
-	_, err = dynamicClient.Resource(instrumentationGVR).Namespace(namespace).Update(ctx, inst, metav1.UpdateOptions{})
-	if err != nil {
-		log.Printf("[controller/error] failed to update instrumentation in namespace %s: %v", namespace, err)
-	}
-	return false
-}
-
-func createInstrumentation(ctx context.Context, dynamicClient dynamic.Interface, namespace string, inst *unstructured.Unstructured) bool {
-	_, err := dynamicClient.Resource(instrumentationGVR).Namespace(namespace).Create(ctx, inst, metav1.CreateOptions{})
-	if err != nil {
-		log.Printf("[controller/error] failed to create instrumentation in namespace %s: %v", namespace, err)
+	if err := applyInstrumentationSpec(ctx, dynamicClient, namespace, agentNamespace); err != nil {
+		log.Printf("[controller/error] failed to apply instrumentation in namespace %s: %v", namespace, err)
 		return false
 	}
-	log.Printf("[controller] dynamically created instrumentation %s in namespace %s", inst.GetName(), namespace)
-	return true
+	if created {
+		log.Printf("[controller] dynamically created instrumentation %s in namespace %s", name, namespace)
+	}
+	return created
 }

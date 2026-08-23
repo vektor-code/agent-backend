@@ -17,13 +17,14 @@ type workloadConfig struct {
 	Language     string `json:"language"`
 }
 
-func syncNamespaceConfig(client *http.Client, url, clusterName string, namespaces []string, pods []ReportedPod, nodes []ReportedNode) (map[string]bool, []workloadConfig, []json.RawMessage, error) {
+func syncNamespaceConfig(client *http.Client, url, clusterName string, namespaces []string, pods []ReportedPod, nodes []ReportedNode, instrumentations []ReportedInstrumentation) (map[string]bool, []workloadConfig, []json.RawMessage, error) {
 	payload, err := json.Marshal(map[string]interface{}{
-		"cluster":        clusterName,
-		"agentNamespace": currentAgentNamespace(),
-		"namespaces":     namespaces,
-		"pods":           pods,
-		"nodes":          nodes,
+		"cluster":          clusterName,
+		"agentNamespace":   currentAgentNamespace(),
+		"namespaces":       namespaces,
+		"pods":             pods,
+		"nodes":            nodes,
+		"instrumentations": instrumentations,
 	})
 	if err != nil {
 		return nil, nil, nil, err

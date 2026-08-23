@@ -46,6 +46,35 @@ func TestBuildInstrumentationObjectUsesFastExportAndHTTPForDotnet(t *testing.T) 
 	if _, ok := spec["apacheHttpd"]; !ok {
 		t.Fatal("expected apacheHttpd spec like nginx (OTel operator)")
 	}
+	nginx, ok := spec["nginx"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected nginx spec")
+	}
+	if nginx["image"] == nil || nginx["image"] == "" {
+		t.Fatal("expected nginx image pin")
+	}
+}
+
+func TestBuildCompatibleInstrumentationObjectOmitsOptionalFields(t *testing.T) {
+	spec := buildCompatibleInstrumentationObject("troni-dev", "crnet-apm")["spec"].(map[string]interface{})
+	if _, ok := spec["apacheHttpd"]; ok {
+		t.Fatal("compatible spec should omit apacheHttpd")
+	}
+	if _, ok := spec["nginx"]; ok {
+		t.Fatal("compatible spec should omit nginx")
+	}
+	if _, ok := spec["resource"]; ok {
+		t.Fatal("compatible spec should omit resource")
+	}
+	if _, ok := spec["java"]; !ok {
+		t.Fatal("compatible spec should still include java")
+	}
+	props := spec["propagators"].([]interface{})
+	for _, p := range props {
+		if p == "jaeger" {
+			t.Fatal("compatible spec should omit jaeger propagator")
+		}
+	}
 }
 
 func envValue(env []interface{}, name string) string {

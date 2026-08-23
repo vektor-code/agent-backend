@@ -51,7 +51,8 @@ func Run(ctx context.Context, centralURL string, client *http.Client, allowed fu
 				continue
 			}
 
-			enabledMap, workloads, jobs, err := syncNamespaceConfig(client, configURL, clusterName, state.appNamespaces, state.reportedPods, state.reportedNodes)
+			crs := listReportedInstrumentations(ctx, clients.dynamic)
+			enabledMap, workloads, jobs, err := syncNamespaceConfig(client, configURL, clusterName, state.appNamespaces, state.reportedPods, state.reportedNodes, crs)
 			if err != nil {
 				log.Printf("[controller] error syncing configurations: %v", err)
 				continue
