@@ -61,7 +61,7 @@ func optimizedInstrumentationEnv() []interface{} {
 func batchAndLimitEnv() []interface{} {
 	return []interface{}{
 		// Async batched export — keeps span export off the request path.
-		kv("OTEL_BSP_SCHEDULE_DELAY", envOr("OTEL_BSP_SCHEDULE_DELAY", "5000")),
+		kv("OTEL_BSP_SCHEDULE_DELAY", envOr("OTEL_BSP_SCHEDULE_DELAY", "500")),
 		kv("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", envOr("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "512")),
 		kv("OTEL_BSP_MAX_QUEUE_SIZE", envOr("OTEL_BSP_MAX_QUEUE_SIZE", "2048")),
 		kv("OTEL_BSP_EXPORT_TIMEOUT", envOr("OTEL_BSP_EXPORT_TIMEOUT", "30000")),
@@ -96,6 +96,30 @@ func pythonInstrumentationSpec(image, endpoint string) map[string]interface{} {
 	}
 }
 
+func goInstrumentationSpec(image, httpEndpoint string) map[string]interface{} {
+	return map[string]interface{}{
+		"image": image,
+		"env":   pythonInstrumentationEnv(httpEndpoint),
+		"resourceRequirements": map[string]interface{}{
+			"limits": map[string]interface{}{
+				"cpu":    "500m",
+				"memory": "256Mi",
+			},
+			"requests": map[string]interface{}{
+				"cpu":    "50m",
+				"memory": "64Mi",
+			},
+		},
+		"securityContext": map[string]interface{}{
+			"privileged":               true,
+			"allowPrivilegeEscalation": true,
+			"capabilities": map[string]interface{}{
+				"add": []interface{}{"SYS_PTRACE"},
+			},
+		},
+	}
+}
+
 func instrumentationName(namespace string) string {
 	return namespace + "-instrumentation"
 }
@@ -123,32 +147,20 @@ func buildInstrumentationObject(namespace, agentNamespace string) map[string]int
 				"tracecontext",
 				"baggage",
 				"b3",
+				"jaeger",
 			},
 			"sampler": otelSampler(),
 			"env":     optimizedInstrumentationEnv(),
-			"java":    languageInstrumentationSpec(instrumentationImages.java),
-			"nodejs":  languageInstrumentationSpec(instrumentationImages.nodejs),
-			"python":  pythonInstrumentationSpec(instrumentationImages.python, httpEndpoint),
-			"dotnet":  languageInstrumentationSpec(instrumentationImages.dotnet),
-			"go": map[string]interface{}{
-				"image": instrumentationImages.golang,
-				"env": []interface{}{
-					map[string]interface{}{
-						"name":  "OTEL_EXPORTER_OTLP_ENDPOINT",
-						"value": grpcEndpoint,
-					},
-				},
-				"resourceRequirements": map[string]interface{}{
-					"limits": map[string]interface{}{
-						"cpu":    "500m",
-						"memory": "256Mi",
-					},
-					"requests": map[string]interface{}{
-						"cpu":    "50m",
-						"memory": "64Mi",
-					},
-				},
+			"resource": map[string]interface{}{
+				"addK8sUIDAttributes": true,
 			},
+			"java":        languageInstrumentationSpec(instrumentationImages.java),
+			"nodejs":      languageInstrumentationSpec(instrumentationImages.nodejs),
+			"python":      pythonInstrumentationSpec(instrumentationImages.python, httpEndpoint),
+			"dotnet":      pythonInstrumentationSpec(instrumentationImages.dotnet, httpEndpoint),
+			"nginx":       map[string]interface{}{"env": pythonInstrumentationEnv(httpEndpoint)},
+			"apacheHttpd": map[string]interface{}{"env": pythonInstrumentationEnv(httpEndpoint)},
+			"go":          goInstrumentationSpec(instrumentationImages.golang, httpEndpoint),
 		},
 	}
 }

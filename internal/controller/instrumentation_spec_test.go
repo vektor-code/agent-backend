@@ -19,6 +19,35 @@ func TestBuildInstrumentationObjectAddsPythonEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestBuildInstrumentationObjectUsesFastExportAndHTTPForDotnet(t *testing.T) {
+	inst := buildInstrumentationObject("troni-dev", "crnet-apm")
+	spec := inst["spec"].(map[string]interface{})
+	env := spec["env"].([]interface{})
+	if got := envValue(env, "OTEL_BSP_SCHEDULE_DELAY"); got != "500" {
+		t.Fatalf("OTEL_BSP_SCHEDULE_DELAY = %q, want 500", got)
+	}
+	dotnet := spec["dotnet"].(map[string]interface{})
+	dotnetEnv := dotnet["env"].([]interface{})
+	if got := envValue(dotnetEnv, "OTEL_EXPORTER_OTLP_PROTOCOL"); got != "http/protobuf" {
+		t.Fatalf("dotnet protocol = %q, want http/protobuf", got)
+	}
+	goSpec := spec["go"].(map[string]interface{})
+	sec := goSpec["securityContext"].(map[string]interface{})
+	if sec["privileged"] != true {
+		t.Fatalf("go sidecar should be privileged for eBPF")
+	}
+	goEnv := goSpec["env"].([]interface{})
+	if got := envValue(goEnv, "OTEL_EXPORTER_OTLP_PROTOCOL"); got != "http/protobuf" {
+		t.Fatalf("go protocol = %q, want http/protobuf (operator/Go auto-instr default)", got)
+	}
+	if got := envValue(goEnv, "OTEL_EXPORTER_OTLP_ENDPOINT"); got != "http://agent-backend.crnet-apm.svc.cluster.local:4318" {
+		t.Fatalf("go endpoint = %q, want HTTP :4318", got)
+	}
+	if _, ok := spec["apacheHttpd"]; !ok {
+		t.Fatal("expected apacheHttpd spec like nginx (OTel operator)")
+	}
+}
+
 func envValue(env []interface{}, name string) string {
 	for _, item := range env {
 		kv, ok := item.(map[string]interface{})

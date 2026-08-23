@@ -29,9 +29,6 @@ func (a *Agent) StartForwarders(ctx context.Context, workers int) {
 
 // Export implements OTLP TraceServiceServer interface to receive traces from SDKs.
 func (a *Agent) Export(ctx context.Context, req *colpb.ExportTraceServiceRequest) (*colpb.ExportTraceServiceResponse, error) {
-	if !a.licenseOK() {
-		return &colpb.ExportTraceServiceResponse{}, nil
-	}
 	a.injectMetadata(req)
 
 	select {
@@ -128,9 +125,6 @@ func (a *Agent) flushDiskBuffer(ctx context.Context) {
 }
 
 func (a *Agent) sendWithRetry(ctx context.Context, req *colpb.ExportTraceServiceRequest) error {
-	if !a.licenseOK() {
-		return nil
-	}
 	data, err := proto.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)

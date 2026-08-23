@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 
@@ -29,8 +30,14 @@ func normalizeInjectLang(language string) string {
 		return "go"
 	case "dotnet", ".net", "csharp":
 		return "dotnet"
-	case "php":
-		return "php"
+	case "php", "ruby", "rails":
+		// Operator 0.58 has no inject-php/inject-ruby. inject-sdk sets OTLP
+		// env (Datadog SSI / OTel docs pattern); we add language env below.
+		return "sdk"
+	case "nginx":
+		return "nginx"
+	case "apache", "httpd", "apache-httpd", "apachehttpd":
+		return "apache-httpd"
 	default:
 		return ""
 	}
@@ -46,6 +53,7 @@ func reconcileWorkloadInstrumentation(ctx context.Context, kube kubernetes.Inter
 		if w.Namespace == "" || w.WorkloadName == "" {
 			continue
 		}
+		origLang := strings.ToLower(strings.TrimSpace(w.Language))
 		lang := normalizeInjectLang(w.Language)
 		if w.Enabled && lang == "" {
 			log.Printf("[controller/workload] skip %s/%s: unsupported language %q", w.Namespace, w.WorkloadName, w.Language)
@@ -56,13 +64,13 @@ func reconcileWorkloadInstrumentation(ctx context.Context, kube kubernetes.Inter
 			desiredKey = injectPrefix + lang
 		}
 		instName := instrumentationName(w.Namespace)
-		patchWorkloadAnnotation(ctx, kube, w, desiredKey, instName)
+		patchWorkloadAnnotation(ctx, kube, w, origLang, lang, desiredKey, instName)
 	}
 }
 
 // patchWorkloadAnnotation ensures the workload's pod template carries exactly the
 // desired inject annotation (or none), removing any stale inject-* keys.
-func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w workloadConfig, desiredKey, instName string) {
+func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w workloadConfig, origLang, lang, desiredKey, instName string) {
 	template, ok := getPodTemplate(ctx, kube, w)
 	if !ok {
 		return
@@ -72,11 +80,10 @@ func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w w
 		current = map[string]string{}
 	}
 
-	// Desired end state: only desiredKey (if any) among the inject-* keys.
 	patch := map[string]interface{}{}
 	for k := range current {
 		if strings.HasPrefix(k, injectPrefix) && k != desiredKey {
-			patch[k] = nil // remove stale / other-language inject annotations
+			patch[k] = nil
 		}
 	}
 	if desiredKey != "" && current[desiredKey] != instName {
@@ -89,18 +96,26 @@ func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w w
 	} else if _, ok := current[goTargetExeAnnotation]; ok {
 		patch[goTargetExeAnnotation] = nil
 	}
-	if len(patch) == 0 {
-		return // already in the desired state — no rollout
+
+	var containers []map[string]interface{}
+	if w.Enabled && (lang == "sdk" || origLang == "php" || origLang == "ruby" || origLang == "rails") {
+		containers = otelLibraryEnvPatch(template, origLang)
 	}
 
-	body, err := json.Marshal(map[string]interface{}{
-		"spec": map[string]interface{}{
-			"template": map[string]interface{}{
-				"metadata": map[string]interface{}{
-					"annotations": patch,
-				},
-			},
+	if len(patch) == 0 && len(containers) == 0 {
+		return
+	}
+
+	tpl := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": patch,
 		},
+	}
+	if len(containers) > 0 {
+		tpl["spec"] = map[string]interface{}{"containers": containers}
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"spec": map[string]interface{}{"template": tpl},
 	})
 	if err != nil {
 		return
@@ -159,17 +174,14 @@ func getPodTemplate(ctx context.Context, kube kubernetes.Interface, w workloadCo
 }
 
 func guessGoTargetExe(template *corev1.PodTemplateSpec) string {
-	if len(template.Spec.Containers) == 0 {
+	if template == nil || len(template.Spec.Containers) == 0 {
 		return "/app"
 	}
 	c := template.Spec.Containers[0]
-	if len(c.Command) > 0 && strings.HasPrefix(c.Command[0], "/") {
-		return c.Command[0]
+	if path := firstProcessPath(append(append([]string{}, c.Command...), c.Args...)); path != "" {
+		return path
 	}
-	if len(c.Args) > 0 && strings.HasPrefix(c.Args[0], "/") {
-		return c.Args[0]
-	}
-	if name := executableName(c.Name); name != "" {
+	if name := executableName(c.Name); name != "" && !genericProcessName(name) {
 		return "/" + name
 	}
 	imageName := c.Image
@@ -182,10 +194,73 @@ func guessGoTargetExe(template *corev1.PodTemplateSpec) string {
 	if at := strings.LastIndex(imageName, "@"); at >= 0 {
 		imageName = imageName[:at]
 	}
-	if name := executableName(imageName); name != "" {
+	if name := executableName(imageName); name != "" && !genericProcessName(name) {
 		return "/" + name
 	}
 	return "/app"
+}
+
+func firstProcessPath(parts []string) string {
+	wrappers := map[string]bool{
+		"sh": true, "bash": true, "ash": true, "dash": true, "busybox": true,
+		"/bin/sh": true, "/bin/bash": true, "/bin/ash": true,
+		"entrypoint.sh": true, "docker-entrypoint.sh": true,
+		"dumb-init": true, "tini": true, "env": true, "/usr/bin/env": true,
+	}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || strings.HasPrefix(part, "-") {
+			continue
+		}
+		base := part
+		if i := strings.LastIndex(part, "/"); i >= 0 {
+			base = part[i+1:]
+		}
+		if wrappers[part] || wrappers[base] {
+			continue
+		}
+		if strings.HasPrefix(part, "/") {
+			return part
+		}
+		if strings.HasPrefix(part, "./") {
+			return "/" + strings.TrimPrefix(part, "./")
+		}
+	}
+	return ""
+}
+
+func genericProcessName(name string) bool {
+	switch strings.ToLower(name) {
+	case "app", "server", "web", "main", "container", "workload", "service":
+		return true
+	}
+	return false
+}
+
+func otelLibraryEnvPatch(template *corev1.PodTemplateSpec, lang string) []map[string]interface{} {
+	if template == nil || len(template.Spec.Containers) == 0 {
+		return nil
+	}
+	endpoint := fmt.Sprintf("http://agent-backend.%s.svc.cluster.local:4318", currentAgentNamespace())
+	out := make([]map[string]interface{}, 0, len(template.Spec.Containers))
+	for _, c := range template.Spec.Containers {
+		env := []map[string]string{
+			{"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": endpoint},
+			{"name": "OTEL_EXPORTER_OTLP_PROTOCOL", "value": "http/protobuf"},
+			{"name": "OTEL_TRACES_EXPORTER", "value": "otlp"},
+			{"name": "OTEL_METRICS_EXPORTER", "value": "none"},
+			{"name": "OTEL_LOGS_EXPORTER", "value": "none"},
+			{"name": "OTEL_SERVICE_NAME", "value": c.Name},
+		}
+		if lang == "php" {
+			env = append(env, map[string]string{"name": "OTEL_PHP_AUTOLOAD_ENABLED", "value": "true"})
+		}
+		out = append(out, map[string]interface{}{
+			"name": c.Name,
+			"env":  env,
+		})
+	}
+	return out
 }
 
 func executableName(value string) string {
