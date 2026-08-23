@@ -24,11 +24,9 @@ func discoverClusterState(ctx context.Context, client *kubernetes.Clientset) (cl
 
 	appNamespaces := appNamespaceNames(nsList.Items)
 	configMapData := discoverConfigMapData(ctx, client)
-	frontendServices := discoverFrontendServices(ctx, client, appNamespaces)
-	servicesByNamespace := discoverServices(ctx, client, appNamespaces)
 	podMetrics := fetchPodMetrics(ctx, client)
 	nodeMetrics := fetchNodeMetrics(ctx, client)
-	reportedPods := discoverReportedPods(ctx, client, frontendServices, servicesByNamespace, configMapData, podMetrics)
+	reportedPods := discoverReportedPods(ctx, client, configMapData, podMetrics)
 	reportedNodes := discoverReportedNodes(ctx, client, nodeMetrics)
 
 	return clusterState{
@@ -60,50 +58,9 @@ func discoverConfigMapData(ctx context.Context, client *kubernetes.Clientset) ma
 	return configMapData
 }
 
-func discoverFrontendServices(ctx context.Context, client *kubernetes.Clientset, appNamespaces []string) map[string]bool {
-	frontendServices := make(map[string]bool)
-	for _, ns := range appNamespaces {
-		ingresses, err := client.NetworkingV1().Ingresses(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			continue
-		}
-		for _, ing := range ingresses.Items {
-			if ing.Spec.DefaultBackend != nil && ing.Spec.DefaultBackend.Service != nil {
-				frontendServices[ns+"/"+ing.Spec.DefaultBackend.Service.Name] = true
-			}
-			for _, rule := range ing.Spec.Rules {
-				if rule.HTTP == nil {
-					continue
-				}
-				for _, path := range rule.HTTP.Paths {
-					if path.Path == "/" || path.Path == "" || path.Path == "/*" {
-						if path.Backend.Service != nil {
-							frontendServices[ns+"/"+path.Backend.Service.Name] = true
-						}
-					}
-				}
-			}
-		}
-	}
-	return frontendServices
-}
-
-func discoverServices(ctx context.Context, client *kubernetes.Clientset, appNamespaces []string) map[string][]corev1.Service {
-	servicesByNamespace := make(map[string][]corev1.Service)
-	for _, ns := range appNamespaces {
-		services, err := client.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
-		if err == nil {
-			servicesByNamespace[ns] = services.Items
-		}
-	}
-	return servicesByNamespace
-}
-
 func discoverReportedPods(
 	ctx context.Context,
 	client *kubernetes.Clientset,
-	frontendServices map[string]bool,
-	servicesByNamespace map[string][]corev1.Service,
 	configMapData map[string]map[string]string,
 	podMetrics metricsSnapshot,
 ) []ReportedPod {
@@ -118,13 +75,7 @@ func discoverReportedPods(
 		if !isAppNamespace(pod.Namespace) {
 			continue
 		}
-		reportedPods = append(reportedPods, reportedPodFromK8sPod(
-			&pod,
-			frontendServices,
-			servicesByNamespace[pod.Namespace],
-			configMapData,
-			podMetrics,
-		))
+		reportedPods = append(reportedPods, reportedPodFromK8sPod(&pod, configMapData, podMetrics))
 	}
 	return reportedPods
 }

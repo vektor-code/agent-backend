@@ -17,7 +17,7 @@ func TestDetectLanguageFromTemurinImage(t *testing.T) {
 			}},
 		},
 	}
-	if got := detectLanguageFromPodSpec(pod, false); got != "java" {
+	if got := detectLanguageFromPodSpec(pod); got != "java" {
 		t.Fatalf("detectLanguageFromPodSpec() = %q, want java", got)
 	}
 }
@@ -30,7 +30,7 @@ func TestDetectNginxEvenWhenFrontend(t *testing.T) {
 			}},
 		},
 	}
-	if got := detectLanguageFromPodSpec(pod, true); got != "nginx" {
+	if got := detectLanguageFromPodSpec(pod); got != "nginx" {
 		t.Fatalf("detectLanguageFromPodSpec() = %q, want nginx", got)
 	}
 }
@@ -43,7 +43,7 @@ func TestDetectApacheHttpdFromImage(t *testing.T) {
 			}},
 		},
 	}
-	if got := detectLanguageFromPodSpec(pod, true); got != "apache-httpd" {
+	if got := detectLanguageFromPodSpec(pod); got != "apache-httpd" {
 		t.Fatalf("detectLanguageFromPodSpec() = %q, want apache-httpd", got)
 	}
 }
@@ -56,7 +56,7 @@ func TestInjectSDKAnnotationDoesNotUseCRName(t *testing.T) {
 			},
 		},
 	}
-	if got := detectLanguageFromPodSpec(pod, false); got != "sdk" {
+	if got := detectLanguageFromPodSpec(pod); got != "sdk" {
 		t.Fatalf("detectLanguageFromPodSpec() = %q, want sdk", got)
 	}
 }

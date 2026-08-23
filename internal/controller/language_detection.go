@@ -6,23 +6,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-func detectLanguageFromPodSpec(pod *corev1.Pod, isFrontend bool) string {
+func detectLanguageFromPodSpec(pod *corev1.Pod) string {
+	images, commands := imagesAndCommands(pod.Spec.Containers)
 	if lang := languageFromAnnotations(pod.Annotations); lang != "" {
-		return lang
+		return resolveInject(lang, images, commands)
 	}
 	if lang := languageFromLabels(pod.Labels); lang != "" {
 		return lang
 	}
-	if lang := languageFromContainers(pod); lang != "" {
-		if isFrontend && lang != "nginx" && lang != "php" && lang != "apache-httpd" {
-			return ""
-		}
-		return lang
-	}
-	if isFrontend {
-		return ""
-	}
-	return languageFromPodName(pod.Name)
+	return resolveInject("", images, commands)
 }
 
 func languageFromAnnotations(annotations map[string]string) string {

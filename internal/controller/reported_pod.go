@@ -45,13 +45,11 @@ type ReportedNode struct {
 
 func reportedPodFromK8sPod(
 	pod *corev1.Pod,
-	frontendServices map[string]bool,
-	services []corev1.Service,
 	configMapData map[string]map[string]string,
 	podMetrics metricsSnapshot,
 ) ReportedPod {
-	isFrontend := isFrontendPod(pod, frontendServices, services)
-	lang := detectLanguageFromPodSpec(pod, isFrontend)
+	lang := detectLanguageFromPodSpec(pod)
+	isFrontend := isStaticHTTPStack(lang)
 	inst, instType, details := getPodInstrumentationStatus(pod)
 	dbName, dbHost, dbPort := detectDatabaseInfo(pod, configMapData)
 	cpuLimit, memoryLimit := resourceLimitsForPod(pod)

@@ -75,6 +75,14 @@ func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w w
 	if !ok {
 		return
 	}
+	if w.Enabled {
+		images, commands := imagesAndCommands(template.Spec.Containers)
+		if coerced := resolveInject(origLang, images, commands); coerced != "" {
+			if n := normalizeInjectLang(coerced); n != "" {
+				lang, origLang, desiredKey = n, coerced, injectPrefix+n
+			}
+		}
+	}
 	current := template.Annotations
 	if current == nil {
 		current = map[string]string{}
