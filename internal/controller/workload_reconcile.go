@@ -107,7 +107,7 @@ func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w w
 
 	var containers []map[string]interface{}
 	if w.Enabled && (lang == "sdk" || origLang == "php" || origLang == "ruby" || origLang == "rails") {
-		containers = otelLibraryEnvPatch(template, origLang)
+		containers = otelLibraryEnvPatch(template, origLang, w.WorkloadName)
 	}
 
 	if len(patch) == 0 && len(containers) == 0 {
@@ -245,20 +245,24 @@ func genericProcessName(name string) bool {
 	return false
 }
 
-func otelLibraryEnvPatch(template *corev1.PodTemplateSpec, lang string) []map[string]interface{} {
+func otelLibraryEnvPatch(template *corev1.PodTemplateSpec, lang, workloadName string) []map[string]interface{} {
 	if template == nil || len(template.Spec.Containers) == 0 {
 		return nil
 	}
 	endpoint := fmt.Sprintf("http://agent-backend.%s.svc.cluster.local:4318", currentAgentNamespace())
 	out := make([]map[string]interface{}, 0, len(template.Spec.Containers))
 	for _, c := range template.Spec.Containers {
+		serviceName := strings.TrimSpace(workloadName)
+		if serviceName == "" {
+			serviceName = c.Name
+		}
 		env := []map[string]string{
 			{"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": endpoint},
 			{"name": "OTEL_EXPORTER_OTLP_PROTOCOL", "value": "http/protobuf"},
 			{"name": "OTEL_TRACES_EXPORTER", "value": "otlp"},
 			{"name": "OTEL_METRICS_EXPORTER", "value": "none"},
 			{"name": "OTEL_LOGS_EXPORTER", "value": "none"},
-			{"name": "OTEL_SERVICE_NAME", "value": c.Name},
+			{"name": "OTEL_SERVICE_NAME", "value": serviceName},
 		}
 		if lang == "php" {
 			env = append(env, map[string]string{"name": "OTEL_PHP_AUTOLOAD_ENABLED", "value": "true"})
