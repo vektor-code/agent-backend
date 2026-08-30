@@ -1,0 +1,13 @@
+# CRNET APM Node.js agent. Injected into every Node service the operator annotates.
+# Layout matches the official autoinstrumentation-nodejs image: /autoinstrumentation.
+# autoinstrumentation.js loads HTTP body capture before the official distro.
+#
+#   docker build -f Dockerfile.agent-nodejs -t $REGISTRY/instrumentation-nodejs:$TAG .
+FROM ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-nodejs:0.78.0
+
+COPY http-capture/nodejs/crnet-http-capture.js /autoinstrumentation/crnet-http-capture.js
+RUN if [ -f /autoinstrumentation/autoinstrumentation.js ]; then \
+      printf "require('./crnet-http-capture.js');\n" \
+        | cat - /autoinstrumentation/autoinstrumentation.js > /tmp/autoinstrumentation.js \
+        && mv /tmp/autoinstrumentation.js /autoinstrumentation/autoinstrumentation.js; \
+    fi

@@ -1,6 +1,9 @@
 package controller
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuildInstrumentationObjectAddsPythonEnvOverrides(t *testing.T) {
 	inst := buildInstrumentationObject("troni-dev", "crnet-apm")
@@ -52,6 +55,49 @@ func TestBuildInstrumentationObjectUsesFastExportAndHTTPForDotnet(t *testing.T) 
 	}
 	if nginx["image"] == nil || nginx["image"] == "" {
 		t.Fatal("expected nginx image pin")
+	}
+}
+
+func TestBuildInstrumentationObjectCapturesHTTPHeaders(t *testing.T) {
+	inst := buildInstrumentationObject("troni-dev", "crnet-apm")
+	spec := inst["spec"].(map[string]interface{})
+	env := spec["env"].([]interface{})
+	if got := envValue(env, "CRNET_HTTP_CAPTURE"); got != "true" {
+		t.Fatalf("CRNET_HTTP_CAPTURE = %q", got)
+	}
+	if got := envValue(env, "OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST"); got == "" {
+		t.Fatal("expected HTTP header capture allowlist")
+	}
+	if strings.Contains(envValue(env, "OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST"), "authorization") {
+		t.Fatal("must not capture Authorization")
+	}
+}
+
+func TestCrnetLanguageAgentsReplaceOfficialInjectors(t *testing.T) {
+	t.Setenv("CRNET_AGENT_JAVA_IMAGE", "registry.example/instrumentation-java:dev")
+	t.Setenv("CRNET_AGENT_PYTHON_IMAGE", "registry.example/instrumentation-python:dev")
+	t.Setenv("CRNET_AGENT_NODEJS_IMAGE", "registry.example/instrumentation-nodejs:dev")
+	inst := buildInstrumentationObject("troni-dev", "crnet-apm")
+	spec := inst["spec"].(map[string]interface{})
+	if spec["java"].(map[string]interface{})["image"] != "registry.example/instrumentation-java:dev" {
+		t.Fatalf("java injector = %#v", spec["java"])
+	}
+	if spec["python"].(map[string]interface{})["image"] != "registry.example/instrumentation-python:dev" {
+		t.Fatalf("python injector = %#v", spec["python"])
+	}
+	if spec["nodejs"].(map[string]interface{})["image"] != "registry.example/instrumentation-nodejs:dev" {
+		t.Fatalf("nodejs injector = %#v", spec["nodejs"])
+	}
+	if _, ok := spec["java"].(map[string]interface{})["extensions"]; ok {
+		t.Fatal("java extensions are not used; the CRNET javaagent is the injector image")
+	}
+}
+
+func TestOfficialInjectorsWhenCrnetAgentsUnset(t *testing.T) {
+	inst := buildInstrumentationObject("troni-dev", "crnet-apm")
+	java := inst["spec"].(map[string]interface{})["java"].(map[string]interface{})["image"].(string)
+	if !strings.Contains(java, "autoinstrumentation-java") {
+		t.Fatalf("expected stock java injector fallback, got %q", java)
 	}
 }
 

@@ -1,0 +1,15 @@
+# CRNET APM Python agent. Injected into every Python service the operator annotates.
+# Layout matches the official autoinstrumentation-python image: /autoinstrumentation.
+#
+#   docker build -f Dockerfile.agent-python -t $REGISTRY/instrumentation-python:$TAG .
+FROM ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-python:0.64b0
+
+COPY http-capture/python/crnet_http_capture.py /autoinstrumentation/crnet_http_capture.py
+RUN set -e; \
+    for f in /autoinstrumentation/sitecustomize.py \
+             /autoinstrumentation/opentelemetry/instrumentation/auto_instrumentation/sitecustomize.py; do \
+      if [ -f "$f" ]; then printf '\nimport crnet_http_capture\n' >> "$f"; fi; \
+    done; \
+    if [ ! -f /autoinstrumentation/sitecustomize.py ]; then \
+      printf 'import crnet_http_capture\n' > /autoinstrumentation/sitecustomize.py; \
+    fi

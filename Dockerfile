@@ -3,6 +3,9 @@
 # so no sibling module is needed:
 #   docker build -f Dockerfile .
 #
+# This image is the in-cluster collector + controller only. Language agents
+# injected into application pods are built from Dockerfile.agent-*.
+#
 # --- Stage 1: Build ---
 FROM golang:1.25-alpine AS builder
 
@@ -32,9 +35,10 @@ WORKDIR /app
 
 # Run as non-root user for security
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-USER appuser
 
 COPY --from=builder /out/agent .
+
+USER appuser
 
 EXPOSE 4317 4318
 

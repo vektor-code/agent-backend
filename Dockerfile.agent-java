@@ -1,0 +1,24 @@
+# CRNET APM Java agent. Injected into every Java service the operator annotates.
+# Layout matches the official autoinstrumentation-java image: /javaagent.jar.
+#
+#   docker build -f Dockerfile.agent-java -t $REGISTRY/instrumentation-java:$TAG .
+FROM ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.31.0 AS otel
+
+FROM maven:3.9.9-eclipse-temurin-17 AS capture
+WORKDIR /src
+COPY http-capture/java/pom.xml .
+COPY http-capture/java/src ./src
+RUN mvn -q -DskipTests package \
+ && cp target/crnet-http-capture-*.jar /tmp/crnet-http-capture.jar
+
+FROM maven:3.9.9-eclipse-temurin-17 AS agent
+WORKDIR /src
+COPY http-capture/java-agent/pom.xml .
+COPY http-capture/java-agent/src ./src
+COPY --from=otel /javaagent.jar src/main/resources/otel-javaagent.jar
+COPY --from=capture /tmp/crnet-http-capture.jar src/main/resources/crnet-http-capture.jar
+RUN mvn -q -DskipTests package \
+ && cp target/crnet-apm-agent-*.jar /tmp/javaagent.jar
+
+FROM ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.31.0
+COPY --from=agent /tmp/javaagent.jar /javaagent.jar

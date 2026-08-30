@@ -42,7 +42,12 @@ func upsertInstrumentation(ctx context.Context, dyn dynamic.Interface, namespace
 
 func applyInstrumentationSpec(ctx context.Context, dyn dynamic.Interface, namespace, agentNamespace string) error {
 	name := instrumentationName(namespace)
-	err := upsertInstrumentation(ctx, dyn, namespace, name, buildInstrumentationObject(namespace, agentNamespace))
+	full := buildInstrumentationObject(namespace, agentNamespace)
+	err := upsertInstrumentation(ctx, dyn, namespace, name, full)
+	if err != nil && instrumentationSpecRejected(err) {
+		log.Printf("[controller] instrumentation extensions rejected in %s (%v); retrying without java extensions", namespace, err)
+		err = upsertInstrumentation(ctx, dyn, namespace, name, stripJavaExtensions(buildInstrumentationObject(namespace, agentNamespace)))
+	}
 	if err != nil && instrumentationSpecRejected(err) {
 		log.Printf("[controller] full instrumentation spec rejected in %s (%v); retrying compatible spec", namespace, err)
 		err = upsertInstrumentation(ctx, dyn, namespace, name, buildCompatibleInstrumentationObject(namespace, agentNamespace))
