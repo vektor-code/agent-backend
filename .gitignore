@@ -15,6 +15,10 @@
 kubetrace-agent-spool/
 agent-spool/
 
+# Python bytecode from local capture-hook tests
+__pycache__/
+*.pyc
+
 # System files
 .DS_Store
 .idea
