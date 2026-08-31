@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -51,8 +53,22 @@ type DeploymentView struct {
 }
 
 type NetworkPolicyView struct {
-	Name   string
-	Select string
+	Name        string
+	Select      string
+	Types       []string
+	IsolatesAll bool
+}
+
+type NodeView struct {
+	Name string
+	IP   string
+	Type string
+}
+
+type EndpointOwner struct {
+	Namespace string
+	Service   string
+	Source    string
 }
 
 type ExecResult struct {
@@ -71,6 +87,8 @@ type Cluster interface {
 	FindDeployment(ctx context.Context, namespace, workload string) (*DeploymentView, error)
 	ListWarningEvents(ctx context.Context, namespace, pod string) ([]string, error)
 	ListNetworkPolicies(ctx context.Context, namespace string) ([]NetworkPolicyView, error)
+	FindNodeByIP(ctx context.Context, ip string) (*NodeView, error)
+	FindEndpointOwnerByIP(ctx context.Context, ip string) (*EndpointOwner, error)
 	FindDiagnosticPod(ctx context.Context, namespace string) (*PodView, error)
 	Exec(ctx context.Context, namespace, pod, container string, argv []string) (*ExecResult, error)
 }
@@ -96,7 +114,23 @@ func (a *k8sCluster) GetPod(ctx context.Context, namespace, name string) (*PodVi
 }
 
 func (a *k8sCluster) FindPodByIP(ctx context.Context, namespace, ip string) (*PodView, error) {
-	if ip == "" {
+	if net.ParseIP(ip) == nil {
+		return nil, nil
+	}
+	// Cluster-wide field selector, same pattern as the OpenTelemetry
+	// k8sattributes processor. Namespace-only listing misses a database
+	// StatefulSet, a sidecar in another NS, or a recycled pod IP.
+	if pods, err := a.client.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector: "status.podIP=" + ip,
+		Limit:         8,
+	}); err == nil {
+		for i := range pods.Items {
+			return podView(&pods.Items[i]), nil
+		}
+	} else if namespace == "" && !apierrors.IsForbidden(err) && !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	if namespace == "" {
 		return nil, nil
 	}
 	pods, err := a.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
@@ -107,6 +141,11 @@ func (a *k8sCluster) FindPodByIP(ctx context.Context, namespace, ip string) (*Po
 		p := &pods.Items[i]
 		if p.Status.PodIP == ip {
 			return podView(p), nil
+		}
+		for _, pip := range p.Status.PodIPs {
+			if pip.IP == ip {
+				return podView(p), nil
+			}
 		}
 	}
 	return nil, nil
@@ -136,24 +175,57 @@ func (a *k8sCluster) FindRunningPods(ctx context.Context, namespace, workload st
 }
 
 func (a *k8sCluster) FindServiceByIP(ctx context.Context, namespace, ip string) (*ServiceView, error) {
-	if ip == "" {
+	if net.ParseIP(ip) == nil {
 		return nil, nil
 	}
-	svcs, err := a.client.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	for i := range svcs.Items {
-		s := &svcs.Items[i]
-		if s.Spec.ClusterIP == ip {
-			ports := make([]int32, 0, len(s.Spec.Ports))
-			for _, p := range s.Spec.Ports {
-				ports = append(ports, p.Port)
-			}
-			return &ServiceView{Name: s.Name, Namespace: s.Namespace, ClusterIP: s.Spec.ClusterIP, Ports: ports}, nil
+	if svcs, err := a.client.CoreV1().Services("").List(ctx, metav1.ListOptions{
+		FieldSelector: "spec.clusterIP=" + ip,
+		Limit:         8,
+	}); err == nil {
+		for i := range svcs.Items {
+			return serviceView(&svcs.Items[i]), nil
 		}
 	}
-	return nil, nil
+	if namespace != "" {
+		if svcs, err := a.client.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{}); err == nil {
+			if v := matchServiceIP(svcs.Items, ip); v != nil {
+				return v, nil
+			}
+		}
+	}
+	svcs, err := a.client.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, nil
+	}
+	return matchServiceIP(svcs.Items, ip), nil
+}
+
+func matchServiceIP(items []corev1.Service, ip string) *ServiceView {
+	for i := range items {
+		s := &items[i]
+		if s.Spec.ClusterIP == ip {
+			return serviceView(s)
+		}
+		for _, ext := range s.Spec.ExternalIPs {
+			if ext == ip {
+				return serviceView(s)
+			}
+		}
+		for _, ing := range s.Status.LoadBalancer.Ingress {
+			if ing.IP == ip {
+				return serviceView(s)
+			}
+		}
+	}
+	return nil
+}
+
+func serviceView(s *corev1.Service) *ServiceView {
+	ports := make([]int32, 0, len(s.Spec.Ports))
+	for _, p := range s.Spec.Ports {
+		ports = append(ports, p.Port)
+	}
+	return &ServiceView{Name: s.Name, Namespace: s.Namespace, ClusterIP: s.Spec.ClusterIP, Ports: ports}
 }
 
 func (a *k8sCluster) GetEndpoints(ctx context.Context, namespace, service string) (*EndpointsView, error) {
@@ -235,9 +307,60 @@ func (a *k8sCluster) ListNetworkPolicies(ctx context.Context, namespace string) 
 		if len(np.Spec.PodSelector.MatchLabels) > 0 {
 			sel = fmt.Sprintf("%v", np.Spec.PodSelector.MatchLabels)
 		}
-		out = append(out, NetworkPolicyView{Name: np.Name, Select: sel})
+		types := make([]string, 0, len(np.Spec.PolicyTypes))
+		for _, t := range np.Spec.PolicyTypes {
+			types = append(types, string(t))
+		}
+		empty := len(np.Spec.PodSelector.MatchLabels) == 0 && len(np.Spec.PodSelector.MatchExpressions) == 0
+		out = append(out, NetworkPolicyView{
+			Name: np.Name, Select: sel, Types: types, IsolatesAll: empty,
+		})
 	}
 	return out, nil
+}
+
+func (a *k8sCluster) FindNodeByIP(ctx context.Context, ip string) (*NodeView, error) {
+	if net.ParseIP(ip) == nil {
+		return nil, nil
+	}
+	nodes, err := a.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		for _, addr := range n.Status.Addresses {
+			if addr.Address == ip {
+				return &NodeView{Name: n.Name, IP: ip, Type: string(addr.Type)}, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+func (a *k8sCluster) FindEndpointOwnerByIP(ctx context.Context, ip string) (*EndpointOwner, error) {
+	if net.ParseIP(ip) == nil {
+		return nil, nil
+	}
+	slices, err := a.client.DiscoveryV1().EndpointSlices("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	for i := range slices.Items {
+		sl := &slices.Items[i]
+		for _, ep := range sl.Endpoints {
+			for _, addr := range ep.Addresses {
+				if addr == ip {
+					svc := sl.Labels["kubernetes.io/service-name"]
+					if svc == "" {
+						svc = sl.Name
+					}
+					return &EndpointOwner{Namespace: sl.Namespace, Service: svc, Source: "EndpointSlice"}, nil
+				}
+			}
+		}
+	}
+	return nil, nil
 }
 
 func (a *k8sCluster) FindDiagnosticPod(ctx context.Context, namespace string) (*PodView, error) {

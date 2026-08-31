@@ -10,19 +10,21 @@ import (
 )
 
 type fakeCluster struct {
-	mu        sync.Mutex
-	pods      map[string]*PodView
-	byIP      map[string]*PodView
-	svcByIP   map[string]*ServiceView
-	endpoints map[string]*EndpointsView
-	deps      map[string]*DeploymentView
-	events    map[string][]string
-	diagPod   *PodView
-	execOut   *ExecResult
-	execErr   error
-	execFn    func(namespace, pod, container string, argv []string) (*ExecResult, error)
-	gets      atomic.Int32
-	execs     atomic.Int32
+	mu            sync.Mutex
+	pods          map[string]*PodView
+	byIP          map[string]*PodView
+	svcByIP       map[string]*ServiceView
+	endpoints     map[string]*EndpointsView
+	deps          map[string]*DeploymentView
+	events        map[string][]string
+	diagPod       *PodView
+	nodes         map[string]*NodeView
+	endpointsByIP map[string]*EndpointOwner
+	execOut       *ExecResult
+	execErr       error
+	execFn        func(namespace, pod, container string, argv []string) (*ExecResult, error)
+	gets          atomic.Int32
+	execs         atomic.Int32
 }
 
 func (f *fakeCluster) GetPod(_ context.Context, ns, name string) (*PodView, error) {
@@ -73,6 +75,18 @@ func (f *fakeCluster) ListWarningEvents(_ context.Context, ns, pod string) ([]st
 }
 func (f *fakeCluster) ListNetworkPolicies(context.Context, string) ([]NetworkPolicyView, error) {
 	return nil, nil
+}
+func (f *fakeCluster) FindNodeByIP(_ context.Context, ip string) (*NodeView, error) {
+	if f.nodes == nil {
+		return nil, nil
+	}
+	return f.nodes[ip], nil
+}
+func (f *fakeCluster) FindEndpointOwnerByIP(_ context.Context, ip string) (*EndpointOwner, error) {
+	if f.endpointsByIP == nil {
+		return nil, nil
+	}
+	return f.endpointsByIP[ip], nil
 }
 func (f *fakeCluster) FindDiagnosticPod(context.Context, string) (*PodView, error) {
 	return f.diagPod, nil
@@ -352,6 +366,18 @@ func TestHttpProbeRejectsInjection(t *testing.T) {
 	}
 }
 
+func TestProbeRejectsMetadataTarget(t *testing.T) {
+	if _, err := httpProbeArgv("http://169.254.169.254/latest/meta-data/"); err == nil {
+		t.Fatal("link-local metadata must be refused")
+	}
+	if _, err := tcpProbeCommands("169.254.169.254", "80"); err == nil {
+		t.Fatal("TCP metadata target must be refused")
+	}
+	if _, err := httpProbeArgv("http://metadata.google.internal/"); err == nil {
+		t.Fatal("metadata hostname must be refused")
+	}
+}
+
 func TestExecutorNoShellUsesNode(t *testing.T) {
 	src := &PodView{Name: "gtm-server-a", Namespace: "highping-dev", Phase: "Running", Ready: true, Workload: "gtm-server", Container: "gtm"}
 	fake := &fakeCluster{
@@ -517,4 +543,127 @@ func TestLimiterBlocksSecondDestination(t *testing.T) {
 	if _, ok := l.acquire("ns", "wl", "10.1.1.1:8080"); !ok {
 		t.Fatal("after release should allow")
 	}
+}
+
+func postgresIntent() Intent {
+	return Intent{
+		InvestigationType:   TypeNetworkTimeout,
+		ClusterID:           "crtnet-ext-k8s",
+		Namespace:           "troni-prod",
+		SourceWorkload:      "marketdatagw-backend",
+		SourcePod:           "marketdatagw-backend-abc",
+		Destination:         "172.16.45.31:5432",
+		DestinationURL:      "http://172.16.45.31:5432/",
+		DestinationType:     "private_ip",
+		DestinationProtocol: "postgresql",
+		Checks:              []string{CheckPodStatus, CheckServiceResolution, CheckEndpointHealth, CheckNetworkPolicy, CheckHTTPRequest},
+		MaxLevel:            3,
+		TraceID:             "t-pg",
+		Fingerprint:         "fp-pg",
+	}
+}
+
+func TestProtocolOfPostgresPortIsTCP(t *testing.T) {
+	p := protocolOf(Intent{Destination: "172.16.45.31:5432", DestinationURL: "http://172.16.45.31:5432/"})
+	if p.Mode != ProbeTCP || p.ID != "postgresql" {
+		t.Fatalf("protocol=%+v", p)
+	}
+	if _, err := tcpProbeCommands("172.16.45.31", "5432"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tcpProbeCommands("172.16.45.31; rm -rf /", "5432"); err == nil {
+		t.Fatal("must reject injected host")
+	}
+}
+
+func TestExecutorPostgresUnmappedUsesTCPNotHTTP(t *testing.T) {
+	src := &PodView{Name: "marketdatagw-backend-abc", Namespace: "troni-prod", Phase: "Running", Ready: true, Workload: "marketdatagw-backend", Container: "app"}
+	fake := &fakeCluster{
+		pods:    map[string]*PodView{"troni-prod/marketdatagw-backend-abc": src},
+		execOut: &ExecResult{Stdout: "TCP_OPEN\n"},
+		execFn: func(_ string, _ string, _ string, argv []string) (*ExecResult, error) {
+			joined := strings.Join(argv, " ")
+			if strings.Contains(joined, "wget") || strings.Contains(joined, "curl") || strings.Contains(joined, "HTTP_STATUS") {
+				t.Fatalf("must not HTTP-probe postgres: %v", argv)
+			}
+			return &ExecResult{Stdout: "TCP_OPEN\n"}, nil
+		},
+	}
+	ex := NewExecutor(fake, func(string) bool { return true }, "crnet-apm")
+	res := ex.Run(context.Background(), postgresIntent())
+	if res.CurrentState != "L4 reachable (not a cluster object)" {
+		t.Fatalf("current=%q inference=%q obs=%+v", res.CurrentState, res.Inference, res.Observations)
+	}
+	if res.Confidence != "MEDIUM" {
+		t.Fatalf("confidence=%s", res.Confidence)
+	}
+	var sawUnmapped, sawTCP, sawHTTP bool
+	for _, o := range res.Observations {
+		if o.Code == "dest_unmapped" && strings.Contains(o.Message, "PostgreSQL") {
+			sawUnmapped = true
+		}
+		if o.Code == "tcp_connect" && strings.Contains(o.Message, "TCP open") {
+			sawTCP = true
+		}
+		if o.Code == "http_request" {
+			sawHTTP = true
+		}
+	}
+	if !sawUnmapped || !sawTCP || sawHTTP {
+		t.Fatalf("unmapped=%v tcp=%v http=%v obs=%+v", sawUnmapped, sawTCP, sawHTTP, res.Observations)
+	}
+}
+
+func TestExecutorMapsEndpointOwnerInsteadOfUnmapped(t *testing.T) {
+	src := &PodView{Name: "marketdatagw-backend-abc", Namespace: "troni-prod", Phase: "Running", Ready: true, Workload: "marketdatagw-backend", Container: "app"}
+	fake := &fakeCluster{
+		pods: map[string]*PodView{"troni-prod/marketdatagw-backend-abc": src},
+		endpointsByIP: map[string]*EndpointOwner{
+			"172.16.45.31": {Namespace: "data", Service: "iam-db", Source: "EndpointSlice"},
+		},
+		execOut: &ExecResult{Stdout: "TCP_OPEN\n"},
+	}
+	ex := NewExecutor(fake, func(string) bool { return true }, "crnet-apm")
+	res := ex.Run(context.Background(), postgresIntent())
+	if res.CurrentState != "L4 reachable" {
+		t.Fatalf("current=%q obs=%+v", res.CurrentState, res.Observations)
+	}
+	found := false
+	for _, o := range res.Observations {
+		if o.Code == "dest_identity" && strings.Contains(o.Message, "data/iam-db") {
+			found = true
+		}
+		if o.Code == "dest_unmapped" {
+			t.Fatalf("should not be unmapped: %+v", res.Observations)
+		}
+	}
+	if !found {
+		t.Fatalf("missing endpoint identity: %+v", res.Observations)
+	}
+}
+
+func TestNetworkPolicyPresentIsNotClaimedAllow(t *testing.T) {
+	obs := concludeNetworkPolicyCheck([]NetworkPolicyView{{Name: "default-deny", IsolatesAll: true}})
+	if obs.OK == nil || *obs.OK {
+		t.Fatalf("namespace-wide policy must not be marked allowed: %+v", obs)
+	}
+	if !strings.Contains(obs.Message, "not simulated") && !strings.Contains(obs.Message, "may be restricted") {
+		t.Fatalf("message=%s", obs.Message)
+	}
+}
+
+func concludeNetworkPolicyCheck(nps []NetworkPolicyView) Observation {
+	names := make([]string, 0, len(nps))
+	isolates := false
+	for _, np := range nps {
+		names = append(names, np.Name)
+		if np.IsolatesAll {
+			isolates = true
+		}
+	}
+	msg := strings.Join(names, ", ")
+	if isolates {
+		return observed("network_policy", "namespace-wide selector: "+msg+". Egress may be restricted; path was not simulated.", 1, false, "")
+	}
+	return observedInfo("network_policy", msg+". Path was not simulated.", 1, "")
 }

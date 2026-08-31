@@ -27,20 +27,21 @@ const (
 // Intent is the structured investigation request from the API. The agent
 // never treats this as a shell command.
 type Intent struct {
-	InvestigationType string    `json:"investigationType"`
-	ClusterID         string    `json:"clusterId"`
-	Namespace         string    `json:"namespace"`
-	SourceWorkload    string    `json:"sourceWorkload"`
-	SourcePod         string    `json:"sourcePod,omitempty"`
-	Destination       string    `json:"destination"`
-	DestinationURL    string    `json:"destinationUrl,omitempty"`
-	DestinationType   string    `json:"destinationType,omitempty"`
-	RecordedHTTP      int       `json:"recordedHttp,omitempty"`
-	Checks            []string  `json:"checks"`
-	MaxLevel          int       `json:"maxLevel"`
-	TraceID           string    `json:"traceId"`
-	Fingerprint       string    `json:"fingerprint"`
-	ExpiresAt         time.Time `json:"expiresAt"`
+	InvestigationType   string    `json:"investigationType"`
+	ClusterID           string    `json:"clusterId"`
+	Namespace           string    `json:"namespace"`
+	SourceWorkload      string    `json:"sourceWorkload"`
+	SourcePod           string    `json:"sourcePod,omitempty"`
+	Destination         string    `json:"destination"`
+	DestinationURL      string    `json:"destinationUrl,omitempty"`
+	DestinationType     string    `json:"destinationType,omitempty"`
+	DestinationProtocol string    `json:"destinationProtocol,omitempty"`
+	RecordedHTTP        int       `json:"recordedHttp,omitempty"`
+	Checks              []string  `json:"checks"`
+	MaxLevel            int       `json:"maxLevel"`
+	TraceID             string    `json:"traceId"`
+	Fingerprint         string    `json:"fingerprint"`
+	ExpiresAt           time.Time `json:"expiresAt"`
 }
 
 type Observation struct {
@@ -50,6 +51,7 @@ type Observation struct {
 	Level   int    `json:"level,omitempty"`
 	OK      *bool  `json:"ok,omitempty"`
 	Pod     string `json:"pod,omitempty"`
+	Hop     string `json:"hop,omitempty"`
 }
 
 type Result struct {
@@ -68,8 +70,32 @@ type Result struct {
 
 func boolPtr(v bool) *bool { return &v }
 
+const (
+	HopSource      = "source"
+	HopDestination = "destination"
+	HopNetwork     = "network"
+	HopProbe       = "probe"
+)
+
 func observed(code, message string, level int, ok bool, pod string) Observation {
-	return Observation{Kind: KindObserved, Code: code, Message: message, Level: level, OK: boolPtr(ok), Pod: pod}
+	return Observation{Kind: KindObserved, Code: code, Message: message, Level: level, OK: boolPtr(ok), Pod: pod, Hop: hopFor(code)}
+}
+
+func observedInfo(code, message string, level int, pod string) Observation {
+	return Observation{Kind: KindObserved, Code: code, Message: message, Level: level, Pod: pod, Hop: hopFor(code)}
+}
+
+func hopFor(code string) string {
+	switch code {
+	case "source_pod_status":
+		return HopSource
+	case "network_policy":
+		return HopNetwork
+	case "http_request", "tcp_connect":
+		return HopProbe
+	default:
+		return HopDestination
+	}
 }
 
 func inference(code, message string) Observation {

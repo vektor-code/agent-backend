@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 )
@@ -16,6 +17,10 @@ func cleanProbeURL(raw string) (string, error) {
 	}
 	if u.Host == "" || u.User != nil {
 		return "", fmt.Errorf("invalid host")
+	}
+	host := u.Hostname()
+	if forbiddenProbeHost(host) {
+		return "", fmt.Errorf("probe target is not permitted")
 	}
 	cleaned := u.Scheme + "://" + u.Host + u.EscapedPath()
 	if u.RawQuery != "" {
@@ -53,6 +58,40 @@ func probeCommands(raw string) ([][]string, error) {
 		{"wget", "-S", "-O", "/dev/null", "-T", "2", "--tries=1", cleaned},
 	}, nil
 }
+
+// tcpProbeCommands never send application bytes. A GET against PostgreSQL is
+// how "connected but received no data" used to appear on :5432.
+func tcpProbeCommands(host, port string) ([][]string, error) {
+	if !validProbeHostPort(host, port) {
+		return nil, fmt.Errorf("invalid tcp target")
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		host = ip.String()
+	}
+	return [][]string{
+		{"python3", "-c", tcpPythonScript, host, port},
+		{"python", "-c", tcpPythonScript, host, port},
+		{"nc", "-z", "-w", "2", host, port},
+		{"/bin/sh", "-c", tcpBusyboxScript, "tcpprobe", host, port},
+	}, nil
+}
+
+const tcpPythonScript = `import socket,sys
+h,p=sys.argv[1],int(sys.argv[2])
+s=socket.create_connection((h,p),3)
+s.close()
+print("TCP_OPEN")
+`
+
+const tcpBusyboxScript = `HOST="$1"; PORT="$2"
+if command -v nc >/dev/null 2>&1; then
+  nc -z -w 2 "$HOST" "$PORT" && echo TCP_OPEN || { echo TCP_FAIL; exit 1; }
+  exit $?
+fi
+python3 -c 'import socket,sys;s=socket.create_connection((sys.argv[1],int(sys.argv[2])),3);s.close();print("TCP_OPEN")' "$HOST" "$PORT" 2>/dev/null && exit 0
+echo TCP_FAIL no client
+exit 2
+`
 
 // nodeProbeScript reads the URL from argv so caller input cannot break out of
 // the script. Extra args to `node -e` start at process.argv[1].

@@ -3,6 +3,7 @@ package investigate
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -111,7 +112,17 @@ func admit(in Intent, isAppNS func(string) bool, agentNS string) (admission, err
 		return admission{}, fmt.Errorf("no relevant checks remain for destination type %q", in.DestinationType)
 	}
 	if seen[CheckHTTPRequest] {
-		if err := validateProbeURL(in.DestinationURL); err != nil {
+		proto := protocolOf(in)
+		if proto.Mode == ProbeHTTP {
+			if err := validateProbeURL(in.DestinationURL); err != nil {
+				checks = without(checks, CheckHTTPRequest)
+			}
+		} else if proto.Mode == ProbeTCP {
+			host, port := splitHostPort(in.Destination)
+			if !validProbeHostPort(host, port) {
+				checks = without(checks, CheckHTTPRequest)
+			}
+		} else {
 			checks = without(checks, CheckHTTPRequest)
 		}
 	}
@@ -131,6 +142,13 @@ func validateProbeURL(raw string) error {
 	}
 	if u.Host == "" || u.User != nil {
 		return fmt.Errorf("invalid host")
+	}
+	host, _, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		host = u.Hostname()
+	}
+	if forbiddenProbeHost(host) {
+		return fmt.Errorf("probe target is not permitted")
 	}
 	return nil
 }

@@ -81,11 +81,16 @@ func (e *Executor) execute(ctx context.Context, in Intent) Result {
 	defer cancel()
 
 	host, _ := splitHostPort(in.Destination)
+	proto := protocolOf(in)
+	if proto.ID != "" && proto.ID != "tcp" && proto.ID != "http" && proto.ID != "https" {
+		res.Observations = append(res.Observations, observedInfo("dest_protocol",
+			fmt.Sprintf("Destination protocol is %s (%s). An HTTP GET is not a valid probe for this port.", proto.Label, proto.Source), 1, ""))
+	}
 	if msg := destinationContextMessage(in.DestinationType, in.Destination); msg != "" {
 		res.Observations = append(res.Observations, observed("destination_context", msg, 1, true, ""))
 	}
 	if wants(admitted.Checks, CheckPodStatus) || wants(admitted.Checks, CheckEvents) {
-		res.Observations = append(res.Observations, e.level1Pod(ctx, in, host)...)
+		res.Observations = append(res.Observations, e.level1Pod(ctx, in, host, proto)...)
 		res.LevelReached = max(res.LevelReached, 1)
 	}
 	if wants(admitted.Checks, CheckServiceResolution) || wants(admitted.Checks, CheckEndpointHealth) {
@@ -97,14 +102,14 @@ func (e *Executor) execute(ctx context.Context, in Intent) Result {
 		res.LevelReached = max(res.LevelReached, 1)
 	}
 	if wants(admitted.Checks, CheckHTTPRequest) && admitted.MaxLevel >= 2 {
-		obs, level := e.httpRequest(ctx, in, admitted.MaxLevel)
+		obs, level := e.liveProbe(ctx, in, admitted.MaxLevel, proto)
 		if obs != nil {
 			res.Observations = append(res.Observations, *obs)
 			res.LevelReached = max(res.LevelReached, level)
 		}
 	}
 
-	res.OriginalState, res.CurrentState, res.Inference, res.Confidence = conclude(in, res.Observations)
+	res.OriginalState, res.CurrentState, res.Inference, res.Confidence = conclude(in, res.Observations, proto)
 	if res.Inference != "" {
 		res.Observations = append(res.Observations, inference("conclusion", res.Inference))
 	}
@@ -115,22 +120,50 @@ func (e *Executor) execute(ctx context.Context, in Intent) Result {
 	return res
 }
 
-func (e *Executor) level1Pod(ctx context.Context, in Intent, host string) []Observation {
+func (e *Executor) level1Pod(ctx context.Context, in Intent, host string, proto Protocol) []Observation {
 	if destIsExternalOrLocal(in.DestinationType, host) {
 		return e.sourcePodStatus(ctx, in)
 	}
 	var out []Observation
 	destPod, _ := e.cluster.FindPodByIP(ctx, in.Namespace, host)
 	if destPod != nil {
+		if destPod.Namespace != "" && destPod.Namespace != in.Namespace {
+			out = append(out, observed("dest_identity", fmt.Sprintf("%s is pod %s in namespace %s (source namespace is %s)", host, destPod.Name, destPod.Namespace, in.Namespace), 1, true, destPod.Name))
+		}
 		out = append(out, e.podFacts(ctx, in, destPod, "pod_status", "Pod")...)
 		if in.SourcePod != "" && in.SourcePod != destPod.Name {
 			out = append(out, e.sourcePodStatus(ctx, in)...)
 		}
 		return out
 	}
-	out = append(out, observed("dest_unmapped", "Could not map "+in.Destination+" to a destination pod in "+in.Namespace, 1, false, ""))
+	if owner, _ := e.cluster.FindEndpointOwnerByIP(ctx, host); owner != nil {
+		out = append(out, observed("dest_identity", fmt.Sprintf("%s is an Endpoint of %s/%s (%s). This is a common pattern for a managed database registered into the cluster.", host, owner.Namespace, owner.Service, owner.Source), 1, true, ""))
+		out = append(out, e.sourcePodStatus(ctx, in)...)
+		return out
+	}
+	if node, _ := e.cluster.FindNodeByIP(ctx, host); node != nil {
+		out = append(out, observed("dest_identity", fmt.Sprintf("%s is node %s (%s). Traffic may be hostNetwork, NodePort, or a process on the node — not a pod IP.", host, node.Name, node.Type), 1, true, ""))
+		out = append(out, e.sourcePodStatus(ctx, in)...)
+		return out
+	}
+	out = append(out, observed("dest_unmapped", unmappedMessage(in, host, proto), 1, false, ""))
 	out = append(out, e.sourcePodStatus(ctx, in)...)
 	return out
+}
+
+func unmappedMessage(in Intent, host string, proto Protocol) string {
+	dest := in.Destination
+	if dest == "" {
+		dest = host
+	}
+	base := "Could not map " + dest + " to a Pod, Service ClusterIP, Endpoint, or Node"
+	if in.Namespace != "" {
+		base += " (searched cluster-wide, not only " + in.Namespace + ")"
+	}
+	if proto.Kind == "database" || proto.Kind == "cache" || proto.Kind == "messaging" {
+		return base + ". Port belongs to " + proto.Label + " — this is likely a VPC or managed " + proto.Label + " address, so Kubernetes Service mapping does not apply."
+	}
+	return base + "."
 }
 
 func (e *Executor) sourcePodStatus(ctx context.Context, in Intent) []Observation {
@@ -148,9 +181,13 @@ func (e *Executor) podFacts(ctx context.Context, in Intent, pod *PodView, code, 
 	var out []Observation
 	detail := fmt.Sprintf("%s %s is %s on %s (Ready=%v)", label, pod.Name, pod.Phase, pod.Node, pod.Ready)
 	out = append(out, observed(code, detail, 1, pod.Ready, pod.Name))
-	if dep, err := e.cluster.FindDeployment(ctx, in.Namespace, pod.Workload); err == nil && dep != nil {
+	if dep, err := e.cluster.FindDeployment(ctx, pod.Namespace, pod.Workload); err == nil && dep != nil {
 		ok := dep.Ready > 0
-		out = append(out, observed("deployment_status", fmt.Sprintf("Deployment %s is Ready %d/%d", dep.Name, dep.Ready, dep.Desired), 1, ok, pod.Name))
+		obs := observed("deployment_status", fmt.Sprintf("Deployment %s is Ready %d/%d", dep.Name, dep.Ready, dep.Desired), 1, ok, pod.Name)
+		if label == "Source pod" {
+			obs.Hop = HopSource
+		}
+		out = append(out, obs)
 	}
 	if wants(in.Checks, CheckEvents) {
 		if ev, err := e.cluster.ListWarningEvents(ctx, pod.Namespace, pod.Name); err == nil && len(ev) > 0 {
@@ -169,17 +206,25 @@ func (e *Executor) level1Service(ctx context.Context, in Intent, host string) []
 	svc, _ := e.cluster.FindServiceByIP(ctx, in.Namespace, host)
 	if svc == nil {
 		if pod, _ := e.cluster.FindPodByIP(ctx, in.Namespace, host); pod != nil {
-			out = append(out, observed("service_resolution", fmt.Sprintf("%s belongs to pod %s (not a Service ClusterIP)", host, pod.Name), 1, true, pod.Name))
+			out = append(out, observed("service_resolution", fmt.Sprintf("%s belongs to pod %s/%s (not a Service ClusterIP)", host, pod.Namespace, pod.Name), 1, true, pod.Name))
 			return out
 		}
-		out = append(out, observed("service_resolution", "Could not map "+host+" to a Service in "+in.Namespace, 1, false, ""))
+		out = append(out, observed("service_resolution", "Could not map "+host+" to a Service ClusterIP, ExternalIP, or LoadBalancer address", 1, false, ""))
 		return out
 	}
-	out = append(out, observed("service_resolution", fmt.Sprintf("Service %s ClusterIP %s", svc.Name, svc.ClusterIP), 1, true, ""))
+	where := svc.Name
+	if svc.Namespace != "" {
+		where = svc.Namespace + "/" + svc.Name
+	}
+	out = append(out, observed("service_resolution", fmt.Sprintf("Service %s ClusterIP %s", where, svc.ClusterIP), 1, true, ""))
 	if !wants(in.Checks, CheckEndpointHealth) {
 		return out
 	}
-	ep, err := e.cluster.GetEndpoints(ctx, svc.Namespace, svc.Name)
+	epNS := svc.Namespace
+	if epNS == "" {
+		epNS = in.Namespace
+	}
+	ep, err := e.cluster.GetEndpoints(ctx, epNS, svc.Name)
 	if err != nil || ep == nil {
 		out = append(out, observed("endpoint_health", "Endpoints for "+svc.Name+" could not be read", 1, false, ""))
 		return out
@@ -199,13 +244,122 @@ func (e *Executor) level1NetworkPolicy(ctx context.Context, in Intent) []Observa
 		return []Observation{observed("network_policy", "NetworkPolicy list failed: "+err.Error(), 1, false, "")}
 	}
 	if len(nps) == 0 {
-		return []Observation{observed("network_policy", "No NetworkPolicy objects in "+in.Namespace, 1, true, "")}
+		return []Observation{observed("network_policy", "No NetworkPolicy objects in "+in.Namespace+" (Kubernetes default-allow; a CNI such as Cilium or Calico may still enforce policy outside this API).", 1, true, "")}
 	}
 	names := make([]string, 0, len(nps))
+	isolates := false
 	for _, np := range nps {
 		names = append(names, np.Name)
+		if np.IsolatesAll {
+			isolates = true
+		}
 	}
-	return []Observation{observed("network_policy", fmt.Sprintf("%d NetworkPolicy object(s) in %s: %s", len(nps), in.Namespace, strings.Join(names, ", ")), 1, true, "")}
+	msg := fmt.Sprintf("%d NetworkPolicy object(s) in %s: %s. Path was not simulated, so this does not prove traffic is allowed.", len(nps), in.Namespace, strings.Join(names, ", "))
+	if isolates {
+		msg = fmt.Sprintf("%d NetworkPolicy object(s) in %s include a namespace-wide selector: %s. Egress to this destination may be restricted; path was not simulated.", len(nps), in.Namespace, strings.Join(names, ", "))
+		return []Observation{observed("network_policy", msg, 1, false, "")}
+	}
+	return []Observation{observedInfo("network_policy", msg, 1, "")}
+}
+
+func (e *Executor) liveProbe(ctx context.Context, in Intent, maxLevel int, proto Protocol) (*Observation, int) {
+	if proto.Mode == ProbeTCP {
+		return e.tcpConnect(ctx, in, maxLevel, proto)
+	}
+	return e.httpRequest(ctx, in, maxLevel)
+}
+
+func (e *Executor) tcpConnect(ctx context.Context, in Intent, maxLevel int, proto Protocol) (*Observation, int) {
+	host, port := splitHostPort(in.Destination)
+	cmds, err := tcpProbeCommands(host, port)
+	if err != nil || len(cmds) == 0 {
+		obs := observed("tcp_connect", "Destination is not a permitted TCP probe target", 2, false, "")
+		return &obs, 1
+	}
+	pod, level, how := e.probePod(ctx, in, maxLevel)
+	if pod == nil {
+		obs := observed("tcp_connect", how, 2, false, "")
+		return &obs, 1
+	}
+	label := proto.Label
+	if label == "" {
+		label = "TCP"
+	}
+	for _, cmd := range cmds {
+		obs, missing := e.execTCP(ctx, in, pod, level, how, cmd, label)
+		if missing {
+			continue
+		}
+		return obs, level
+	}
+	if maxLevel >= 3 && (pod.Labels == nil || pod.Labels["app"] != "crnet-diagnostics") {
+		if worker, err := e.cluster.FindDiagnosticPod(ctx, in.Namespace); err == nil && worker != nil && worker.Name != pod.Name {
+			for _, cmd := range cmds {
+				wobs, missing := e.execTCP(ctx, in, worker, 3, "source container has no shell; reused diagnostic worker "+worker.Name, cmd, label)
+				if missing {
+					continue
+				}
+				return wobs, 3
+			}
+		}
+	}
+	skip := observed("tcp_connect", "Live TCP probe skipped: container has no usable TCP client for this runtime", level, false, pod.Name)
+	return &skip, level
+}
+
+func (e *Executor) execTCP(ctx context.Context, in Intent, pod *PodView, level int, how string, cmd []string, label string) (*Observation, bool) {
+	if level >= 3 {
+		release, ok := e.limit.acquireWorker(in.Namespace)
+		if !ok {
+			obs := observed("tcp_connect", "Live retry skipped: diagnostic worker already in use in "+in.Namespace, 2, false, "")
+			return &obs, false
+		}
+		defer release()
+	}
+	res, execErr := e.cluster.Exec(ctx, pod.Namespace, pod.Name, pod.Container, cmd)
+	if missingExecBinary(execErr, res) {
+		return nil, true
+	}
+	from := "source pod " + pod.Name
+	if strings.Contains(how, "diagnostic worker") {
+		from = "diagnostic worker " + pod.Name
+	}
+	detail := fmt.Sprintf("Live %s TCP check from %s to %s", label, from, in.Destination)
+	ok := false
+	body := ""
+	if res != nil {
+		body = strings.TrimSpace(res.Stdout + " " + res.Stderr)
+	}
+	lower := strings.ToLower(body + " " + errString(execErr))
+	switch {
+	case strings.Contains(lower, "tcp_open") || (execErr == nil && !strings.Contains(lower, "tcp_fail") && !strings.Contains(lower, "refused") && !strings.Contains(lower, "timed out") && !strings.Contains(lower, "timeout")):
+		detail += ": TCP open (no application handshake)"
+		ok = true
+	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "econnrefused"):
+		detail += ": connection refused"
+	case strings.Contains(lower, "timed out") || strings.Contains(lower, "timeout") || strings.Contains(lower, "etimedout") || strings.Contains(lower, "i/o timeout"):
+		detail += ": timed out"
+	case execErr != nil && body == "":
+		detail += " failed: " + execErr.Error()
+	default:
+		if len(body) > 180 {
+			body = body[:180]
+		}
+		if body != "" {
+			detail += "; probe output: " + body
+		} else if execErr != nil {
+			detail += " failed: " + execErr.Error()
+		}
+	}
+	obs := observed("tcp_connect", detail, level, ok, pod.Name)
+	return &obs, false
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (e *Executor) httpRequest(ctx context.Context, in Intent, maxLevel int) (*Observation, int) {
@@ -314,26 +468,59 @@ func (e *Executor) probePod(ctx context.Context, in Intent, maxLevel int) (*PodV
 	return nil, 1, "Live retry skipped: no running source pod in " + in.Namespace
 }
 
-func conclude(in Intent, obs []Observation) (string, string, string, string) {
+func conclude(in Intent, obs []Observation, proto Protocol) (string, string, string, string) {
 	var probe *Observation
 	var destReady *Observation
 	var sourceReady *Observation
+	var destUnmapped *Observation
+	var destIdentity *Observation
 	for i := range obs {
 		o := &obs[i]
 		if o.Kind != KindObserved {
 			continue
 		}
 		switch o.Code {
-		case "http_request":
+		case "http_request", "tcp_connect":
 			probe = o
 		case "pod_status":
 			destReady = o
 		case "source_pod_status":
 			sourceReady = o
+		case "dest_unmapped":
+			destUnmapped = o
+		case "dest_identity":
+			destIdentity = o
 		}
 	}
 	original := originalStateFor(in)
-	if probe != nil && probe.OK != nil && *probe.OK && in.InvestigationType == TypeDownstreamHTTPFailure {
+	if probe != nil && probe.Code == "tcp_connect" {
+		open := probe.OK != nil && *probe.OK
+		if open && destUnmapped != nil {
+			label := proto.Label
+			if label == "" {
+				label = "the remote port"
+			}
+			return original, "L4 reachable (not a cluster object)",
+				fmt.Sprintf("A live TCP check from the source pod reached this address. It is not a Pod, Service, Endpoint, or Node in the cluster. Port is %s, so treat this as an external or VPC %s — the recorded timeout is wait on that backend, not a missing Kubernetes endpoint.", label, label),
+				"MEDIUM"
+		}
+		if open && destIdentity != nil {
+			return original, "L4 reachable",
+				"A live TCP check from the source pod reached this address. Kubernetes identity was resolved; the original failure was not an L4 drop at investigation time.",
+				"MEDIUM"
+		}
+		if open {
+			return original, "L4 reachable",
+				"A live TCP check from the source pod reached this address. The recorded timeout is not a current TCP connect failure.",
+				"MEDIUM"
+		}
+		if probeShowsTransportFailure(probe.Message) {
+			return original, "Still failing",
+				"A live TCP check from the source pod still could not complete to this destination. That supports a transport / upstream connectivity classification.",
+				"MEDIUM"
+		}
+	}
+	if probe != nil && probe.OK != nil && *probe.OK && in.InvestigationType == TypeDownstreamHTTPFailure && probe.Code == "http_request" {
 		return original, "Reproduced", "The live retry reproduced the recorded HTTP failure from the same workload context", "HIGH"
 	}
 	if probe != nil && probe.OK != nil && !*probe.OK && strings.Contains(probe.Message, "returned HTTP") {
@@ -347,7 +534,10 @@ func conclude(in Intent, obs []Observation) (string, string, string, string) {
 		return original, "Still failing", "A live retry from the same source pod still could not complete an HTTP response to this destination. That supports the original transport / upstream connectivity classification", "MEDIUM"
 	}
 	if probeSkippedNoClient(probe) {
-		inf := "Live HTTP probe could not run because the source container has no /bin/sh and no usable HTTP client. Original classification is unchanged"
+		inf := "Live probe could not run because the source container has no /bin/sh and no usable client. Original classification is unchanged"
+		if probe != nil && probe.Code == "http_request" {
+			inf = "Live HTTP probe could not run because the source container has no /bin/sh and no usable HTTP client. Original classification is unchanged"
+		}
 		if sourceNotReady(sourceReady) {
 			inf += ". The source pod is currently not Ready; that is live source state and does not by itself explain the recorded external upstream failure"
 		}
@@ -358,6 +548,15 @@ func conclude(in Intent, obs []Observation) (string, string, string, string) {
 	}
 	if destIsExternalOrLocal(in.DestinationType, "") && sourceNotReady(sourceReady) {
 		return original, "Source not ready", "The source pod is currently not Ready. That is live source state and does not by itself prove the external destination failed", "MEDIUM"
+	}
+	if destUnmapped != nil && (proto.Kind == "database" || proto.Kind == "cache" || proto.Kind == "messaging") {
+		label := proto.Label
+		if label == "" {
+			label = "this protocol"
+		}
+		return original, "Not a cluster object",
+			fmt.Sprintf("This address is not a Pod, Service, Endpoint, or Node in the cluster. Port is %s, so Kubernetes verification cannot prove a missing workload. Investigate the %s instance (VPC, managed service, or ExternalName).", label, label),
+			"MEDIUM"
 	}
 	if probe == nil && destReady != nil && destReady.OK != nil && *destReady.OK {
 		return original, "Not verified", "Destination workload is currently Ready; no live HTTP probe evidence was collected", "LOW"
@@ -373,7 +572,10 @@ func probeSkippedNoClient(probe *Observation) bool {
 		return false
 	}
 	msg := strings.ToLower(probe.Message)
-	return strings.Contains(msg, "no usable http client") || strings.Contains(msg, "no /bin/sh") || strings.Contains(msg, "no usable HTTP client")
+	return strings.Contains(msg, "no usable http client") ||
+		strings.Contains(msg, "no /bin/sh") ||
+		strings.Contains(msg, "no usable HTTP client") ||
+		strings.Contains(msg, "no usable tcp client")
 }
 
 func probeShowsTransportFailure(msg string) bool {
@@ -381,6 +583,7 @@ func probeShowsTransportFailure(msg string) bool {
 	return strings.Contains(lower, "timed out") ||
 		strings.Contains(lower, "timeout") ||
 		strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "tcp_fail") ||
 		strings.Contains(lower, "no route to host") ||
 		strings.Contains(lower, "network is unreachable")
 }
