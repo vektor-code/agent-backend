@@ -30,9 +30,16 @@ func TestBuildInstrumentationObjectUsesFastExportAndHTTPForDotnet(t *testing.T) 
 		t.Fatalf("OTEL_BSP_SCHEDULE_DELAY = %q, want 500", got)
 	}
 	dotnet := spec["dotnet"].(map[string]interface{})
+	dotnetImage, _ := dotnet["image"].(string)
+	if !strings.Contains(dotnetImage, "autoinstrumentation-dotnet") {
+		t.Fatalf("dotnet image = %q, want autoinstrumentation-dotnet (not python)", dotnetImage)
+	}
 	dotnetEnv := dotnet["env"].([]interface{})
 	if got := envValue(dotnetEnv, "OTEL_EXPORTER_OTLP_PROTOCOL"); got != "http/protobuf" {
 		t.Fatalf("dotnet protocol = %q, want http/protobuf", got)
+	}
+	if got := envValue(dotnetEnv, "OTEL_EXPORTER_OTLP_ENDPOINT"); !strings.Contains(got, ":4318") {
+		t.Fatalf("dotnet endpoint = %q, want HTTP :4318", got)
 	}
 	goSpec := spec["go"].(map[string]interface{})
 	sec := goSpec["securityContext"].(map[string]interface{})

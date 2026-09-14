@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/kubetrace/agent-backend/internal/centralauth"
 )
 
 // workloadConfig is a per-service instrumentation override the operator set in
@@ -35,6 +37,7 @@ func syncNamespaceConfig(client *http.Client, url, clusterName string, namespace
 		return nil, nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	centralauth.Apply(req)
 
 	resp, err := client.Do(req)
 	if err != nil {

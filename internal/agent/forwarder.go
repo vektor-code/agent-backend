@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/kubetrace/agent-backend/internal/centralauth"
 	colpb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	resourcev1 "go.opentelemetry.io/proto/otlp/resource/v1"
 	"google.golang.org/protobuf/proto"
@@ -159,6 +160,7 @@ func (a *Agent) postPayload(ctx context.Context, data []byte) (bool, error) {
 		return false, err
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
+	centralauth.Apply(req)
 
 	resp, err := a.client.Do(req)
 	if err != nil {

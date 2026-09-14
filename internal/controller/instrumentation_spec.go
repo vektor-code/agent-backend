@@ -98,6 +98,16 @@ func pythonInstrumentationSpec(image, endpoint string) map[string]interface{} {
 	}
 }
 
+// dotnetInstrumentationSpec uses the .NET auto-instrumentation image with the
+// HTTP OTLP exporter profile (same transport as Python). It must not reuse the
+// Python inject image — only the shared HTTP exporter env.
+func dotnetInstrumentationSpec(image, endpoint string) map[string]interface{} {
+	return map[string]interface{}{
+		"image": image,
+		"env":   pythonInstrumentationEnv(endpoint),
+	}
+}
+
 func goInstrumentationEnv(endpoint string) []interface{} {
 	env := []interface{}{
 		kv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint),
@@ -178,7 +188,7 @@ func buildInstrumentationObjectOpts(namespace, agentNamespace string, compatible
 		"java":        javaInstrumentationSpec(instrumentationImages.java),
 		"nodejs":      nodejsInstrumentationSpec(instrumentationImages.nodejs),
 		"python":      pythonCaptureInstrumentationSpec(instrumentationImages.python, httpEndpoint),
-		"dotnet":      pythonInstrumentationSpec(instrumentationImages.dotnet, httpEndpoint),
+		"dotnet":      dotnetInstrumentationSpec(instrumentationImages.dotnet, httpEndpoint),
 		"go":          goInstrumentationSpec(instrumentationImages.golang, httpEndpoint, compatible),
 	}
 	if !compatible {

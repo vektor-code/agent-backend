@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kubetrace/agent-backend/internal/centralauth"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -87,6 +88,7 @@ func (r *Runner) pullAndRun(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	centralauth.Apply(req)
 	resp, err := r.cfg.HTTP.Do(req)
 	if err != nil {
 		return
@@ -139,6 +141,7 @@ func (r *Runner) postResult(ctx context.Context, res Result) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	centralauth.Apply(req)
 	resp, err := r.cfg.HTTP.Do(req)
 	if err != nil {
 		return err
