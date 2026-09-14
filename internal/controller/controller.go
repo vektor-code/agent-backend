@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kubetrace/agent-backend/internal/investigate"
+	"github.com/kubetrace/agent-backend/internal/platformhealth"
 )
 
 func Run(ctx context.Context, centralURL string, client *http.Client, allowed func() bool) {
@@ -36,6 +37,9 @@ func Run(ctx context.Context, centralURL string, client *http.Client, allowed fu
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
+	var lastHealth *platformhealth.Report
+	var lastHealthAt time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -51,8 +55,22 @@ func Run(ctx context.Context, centralURL string, client *http.Client, allowed fu
 				continue
 			}
 
+			// Refresh APM pod diagnostics periodically so separate-cluster
+			// installs can surface agent/operator logs in central Admin.
+			if lastHealth == nil || time.Since(lastHealthAt) >= 60*time.Second {
+				if report, herr := platformhealth.Collect(ctx, clients.kube, platformhealth.Options{
+					Namespace: currentAgentNamespace(),
+					TailLines: 200,
+				}); herr != nil {
+					log.Printf("[controller] platform health collect: %v", herr)
+				} else {
+					lastHealth = platformhealth.OnlyPresentComponents(platformhealth.TagCluster(report, clusterName))
+					lastHealthAt = time.Now()
+				}
+			}
+
 			crs := listReportedInstrumentations(ctx, clients.dynamic)
-			enabledMap, workloads, jobs, err := syncNamespaceConfig(client, configURL, clusterName, state.appNamespaces, state.reportedPods, state.reportedNodes, crs)
+			enabledMap, workloads, jobs, err := syncNamespaceConfig(client, configURL, clusterName, state.appNamespaces, state.reportedPods, state.reportedNodes, crs, lastHealth)
 			if err != nil {
 				log.Printf("[controller] error syncing configurations: %v", err)
 				continue

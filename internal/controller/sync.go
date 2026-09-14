@@ -19,7 +19,7 @@ type workloadConfig struct {
 	Language     string `json:"language"`
 }
 
-func syncNamespaceConfig(client *http.Client, url, clusterName string, namespaces []string, pods []ReportedPod, nodes []ReportedNode, instrumentations []ReportedInstrumentation) (map[string]bool, []workloadConfig, []json.RawMessage, error) {
+func syncNamespaceConfig(client *http.Client, url, clusterName string, namespaces []string, pods []ReportedPod, nodes []ReportedNode, instrumentations []ReportedInstrumentation, platformHealth any) (map[string]bool, []workloadConfig, []json.RawMessage, error) {
 	payload, err := json.Marshal(map[string]interface{}{
 		"cluster":          clusterName,
 		"agentNamespace":   currentAgentNamespace(),
@@ -27,6 +27,7 @@ func syncNamespaceConfig(client *http.Client, url, clusterName string, namespace
 		"pods":             pods,
 		"nodes":            nodes,
 		"instrumentations": instrumentations,
+		"platformHealth":   platformHealth,
 	})
 	if err != nil {
 		return nil, nil, nil, err
