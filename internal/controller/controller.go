@@ -69,11 +69,21 @@ func Run(ctx context.Context, centralURL string, client *http.Client, allowed fu
 				enabledMap,
 				prevEnabled,
 			)
+			// Workload-level enable also needs a live Instrumentation CR
+			// ({ns}-instrumentation) or the operator webhook fails with NotFound.
+			for _, ns := range ensureInstrumentationForWorkloads(ctx, clients.dynamic, workloads) {
+				restartNamespaces = append(restartNamespaces, ns)
+			}
 			// Apply per-service inject annotations first, then roll namespaces
 			// whose Instrumentation CR was created/toggled so pods are admitted
 			// with the webhook against a live CR.
 			reconcileWorkloadInstrumentation(ctx, clients.kube, workloads)
+			seenRestart := map[string]bool{}
 			for _, ns := range restartNamespaces {
+				if ns == "" || seenRestart[ns] {
+					continue
+				}
+				seenRestart[ns] = true
 				restartAnnotatedWorkloads(ctx, clients.kube, ns)
 			}
 			prevEnabled = enabledMap

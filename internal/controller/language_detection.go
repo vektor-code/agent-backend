@@ -30,16 +30,21 @@ func detectLanguageFromPodSpec(pod *corev1.Pod) string {
 	if lang := languageFromContainers(apps); lang != "" {
 		return resolveInject(lang, images, commands)
 	}
+	// Init containers often reveal the build/runtime (e.g. maven, npm) when the
+	// main image is a generic distroless/ubuntu binary.
+	if lang := languageFromContainers(appContainers(pod.Spec.InitContainers)); lang != "" {
+		return resolveInject(lang, images, commands)
+	}
+	if lang := languageFromVolumes(pod); lang != "" {
+		return resolveInject(lang, images, commands)
+	}
 	if lang := languageFromPodName(pod.Name); lang != "" {
 		return resolveInject(lang, images, commands)
 	}
-	if lang := languageFromLabels(pod.Labels); lang == "" {
-		// also try common name-ish labels as weak hints
-		if pod.Labels != nil {
-			for _, key := range []string{"app.kubernetes.io/name", "app.kubernetes.io/component", "app"} {
-				if lang := languageFromPodName(pod.Labels[key]); lang != "" {
-					return resolveInject(lang, images, commands)
-				}
+	if pod.Labels != nil {
+		for _, key := range []string{"app.kubernetes.io/name", "app.kubernetes.io/component", "app", "app.kubernetes.io/instance"} {
+			if lang := languageFromPodName(pod.Labels[key]); lang != "" {
+				return resolveInject(lang, images, commands)
 			}
 		}
 	}
@@ -211,6 +216,41 @@ func looksPHPEnv(env []corev1.EnvVar) bool {
 	return false
 }
 
+func languageFromVolumes(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	blob := ""
+	for _, v := range pod.Spec.Volumes {
+		blob += " " + strings.ToLower(v.Name)
+	}
+	for _, c := range append(append([]corev1.Container{}, pod.Spec.Containers...), pod.Spec.InitContainers...) {
+		for _, m := range c.VolumeMounts {
+			blob += " " + strings.ToLower(m.Name) + " " + strings.ToLower(m.MountPath)
+		}
+	}
+	switch {
+	case containsAny(blob, "node_modules", "/.npm", "npm-cache", "yarn-cache", "pnpm-store"):
+		return "nodejs"
+	case containsAny(blob, "/.m2", "maven", "/.gradle", "gradle-cache"):
+		return "java"
+	case containsAny(blob, "/.nuget", "nuget", "/app/publish"):
+		return "dotnet"
+	case containsAny(blob, "pip-cache", "/.cache/pip", "poetry-cache", "venv", "virtualenv"):
+		return "python"
+	case containsAny(blob, "bundle", "vendor/bundle", "/.gem"):
+		return "ruby"
+	case containsAny(blob, "composer", "/.composer"):
+		return "php"
+	case containsAny(blob, "nginx", "html"):
+		// weak — only if mount looks like static site root with nginx name
+		if containsAny(blob, "nginx") {
+			return "nginx"
+		}
+	}
+	return ""
+}
+
 func languageFromImage(image string) string {
 	img := strings.ToLower(image)
 	// Strip digest/tag noise for matching repo name.
@@ -219,7 +259,6 @@ func languageFromImage(image string) string {
 		repo = repo[:i]
 	}
 	if i := strings.LastIndex(repo, ":"); i >= 0 {
-		// keep path before tag, but only if tag doesn't look like a port
 		after := repo[i+1:]
 		if !strings.Contains(after, "/") {
 			repo = repo[:i]
@@ -231,37 +270,51 @@ func languageFromImage(image string) string {
 	case containsAny(img, "openjdk", "eclipse-temurin", "temurin", "amazoncorretto", "corretto",
 		"microsoft-openjdk", "ibm-semeru", "liberica", "sapmachine", "graalvm", "distroless/java",
 		"tomcat", "wildfly", "jboss", "payara", "weblogic", "spring-boot", "maven", "gradle",
-		"/jre", "/jdk", "jre-", "jdk-"):
+		"/jre", "/jdk", "jre-", "jdk-", "azul/zulu", "bellsoft", "adoptium", "chainguard/jdk",
+		"chainguard/jre", "bitnami/java", "bitnami/tomcat", "quarkus", "micronaut"):
 		return "java"
-	case containsAny(img, "node:", "nodejs", "distroless/nodejs", "/node@", "bitnami/node", "oven/bun"):
-		// bun often runs JS — map to nodejs inject
+	case containsAny(img, "node:", "nodejs", "distroless/nodejs", "/node@", "bitnami/node", "oven/bun",
+		"chainguard/node", "cgr.dev/chainguard/node"):
 		return "nodejs"
 	case base == "node" || strings.HasPrefix(base, "node-"):
 		return "nodejs"
-	case containsAny(img, "python", "gunicorn", "uvicorn", "flask", "django", "distroless/python", "bitnami/python", "pypy"):
+	case containsAny(img, "python", "gunicorn", "uvicorn", "flask", "django", "distroless/python",
+		"bitnami/python", "pypy", "chainguard/python", "cgr.dev/chainguard/python"):
 		return "python"
 	case base == "python" || strings.HasPrefix(base, "python"):
 		return "python"
-	case containsAny(img, "php-fpm", "wordpress", "laravel", "bitnami/php", "php:"):
+	case containsAny(img, "php-fpm", "wordpress", "laravel", "bitnami/php", "php:", "chainguard/php"):
 		return "php"
 	case base == "php" || strings.HasPrefix(base, "php"):
 		return "php"
-	case containsAny(img, "ruby", "rails", "puma", "bitnami/ruby"):
+	case containsAny(img, "ruby", "rails", "puma", "bitnami/ruby", "chainguard/ruby"):
 		return "ruby"
 	case containsAny(img, "dotnet", "aspnet", "microsoft-dotnet", "mcr.microsoft.com/dotnet"):
 		return "dotnet"
-	case containsAny(img, "nginx", "openresty", "bitnami/nginx"):
+	case containsAny(img, "nginx", "openresty", "bitnami/nginx", "chainguard/nginx", "caddy"):
 		return "nginx"
 	case containsAny(img, "httpd", "apache2", "bitnami/apache"):
 		return "apache-httpd"
-	case containsAny(img, "golang", "distroless/static", "distroless/base", "scratch"):
-		if containsAny(img, "golang", "/go:", "/go@", "library/golang") || base == "go" || strings.HasPrefix(base, "go-") {
-			return "go"
-		}
-		// bare distroless/static is often Go — weak signal, still useful
-		if containsAny(img, "distroless/static", "gcr.io/distroless/static", "gcr.io/distroless/base") {
-			return "go"
-		}
+	case containsAny(img, "golang", "library/golang", "chainguard/go", "bitnami/golang"):
+		return "go"
+	case containsAny(img, "distroless/static", "gcr.io/distroless/static", "gcr.io/distroless/base", "distroless/base"):
+		return "go"
+	case containsAny(base, "java", "jdk", "jre", "spring", "tomcat"):
+		return "java"
+	case containsAny(base, "node", "npm"):
+		return "nodejs"
+	case containsAny(base, "python", "django", "flask"):
+		return "python"
+	case containsAny(base, "dotnet", "aspnet"):
+		return "dotnet"
+	case containsAny(base, "nginx", "openresty"):
+		return "nginx"
+	case containsAny(base, "php"):
+		return "php"
+	case containsAny(base, "ruby", "rails"):
+		return "ruby"
+	case base == "go" || strings.HasPrefix(base, "go-") || strings.Contains(base, "golang"):
+		return "go"
 	}
 	return ""
 }
@@ -298,7 +351,7 @@ func languageFromCommand(c corev1.Container) string {
 			return "php"
 		case base == "ruby" || base == "bundle" || base == "puma" || base == "rails" || base == "rackup":
 			return "ruby"
-		case base == "dotnet":
+		case base == "dotnet" || strings.HasSuffix(base, ".dll"):
 			return "dotnet"
 		case base == "nginx" || base == "nginx-debug" || base == "openresty":
 			return "nginx"

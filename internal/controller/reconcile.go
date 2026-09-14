@@ -89,3 +89,24 @@ func applyInstrumentation(ctx context.Context, dynamicClient dynamic.Interface, 
 	}
 	return created
 }
+
+// ensureInstrumentationForWorkloads creates missing Instrumentation CRs for any
+// namespace that has an enabled per-workload config (even if the namespace-level
+// toggle is off). Returns namespaces where a CR was newly created.
+func ensureInstrumentationForWorkloads(ctx context.Context, dynamicClient dynamic.Interface, workloads []workloadConfig) []string {
+	agentNs := currentAgentNamespace()
+	needed := map[string]bool{}
+	for _, w := range workloads {
+		if w.Enabled && w.Namespace != "" {
+			needed[w.Namespace] = true
+		}
+	}
+	var created []string
+	for ns := range needed {
+		name := instrumentationName(ns)
+		if applyInstrumentation(ctx, dynamicClient, ns, name, agentNs) {
+			created = append(created, ns)
+		}
+	}
+	return created
+}
