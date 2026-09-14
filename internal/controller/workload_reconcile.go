@@ -54,9 +54,31 @@ func reconcileWorkloadInstrumentation(ctx context.Context, kube kubernetes.Inter
 			continue
 		}
 		origLang := strings.ToLower(strings.TrimSpace(w.Language))
-		lang := normalizeInjectLang(w.Language)
+		if origLang == "auto" || origLang == "detect" || origLang == "automatic" {
+			origLang = ""
+		}
+		lang := normalizeInjectLang(origLang)
 		if w.Enabled && lang == "" {
-			log.Printf("[controller/workload] skip %s/%s: unsupported language %q", w.Namespace, w.WorkloadName, w.Language)
+			// Operator left language blank / auto — detect from the live pod template.
+			if template, ok := getPodTemplate(ctx, kube, w); ok {
+				pseudo := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        w.WorkloadName,
+						Namespace:   w.Namespace,
+						Labels:      template.Labels,
+						Annotations: template.Annotations,
+					},
+					Spec: template.Spec,
+				}
+				if detected := detectLanguageFromPodSpec(pseudo); detected != "" {
+					origLang = detected
+					lang = normalizeInjectLang(detected)
+					log.Printf("[controller/workload] auto-detected %s for %s/%s", lang, w.Namespace, w.WorkloadName)
+				}
+			}
+		}
+		if w.Enabled && lang == "" {
+			log.Printf("[controller/workload] skip %s/%s: could not detect language (set one in Admin)", w.Namespace, w.WorkloadName)
 			continue
 		}
 		desiredKey := ""

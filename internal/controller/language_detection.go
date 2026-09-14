@@ -1,53 +1,79 @@
 package controller
 
 import (
+	"path"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 )
 
+// detectLanguageFromPodSpec picks the runtime the OpenTelemetry inject
+// annotation should use. Priority:
+//  1. Existing inject-* annotations (already instrumented)
+//  2. Explicit language labels (normalized)
+//  3. App containers: command > env > image (sidecars skipped)
+//  4. Pod / workload name heuristics
+//  5. processStack fallback over all app image+command blobs
 func detectLanguageFromPodSpec(pod *corev1.Pod) string {
-	images, commands := imagesAndCommands(pod.Spec.Containers)
+	if pod == nil {
+		return ""
+	}
+	apps := appContainers(pod.Spec.Containers)
+	images, commands := imagesAndCommands(apps)
+
 	if lang := languageFromAnnotations(pod.Annotations); lang != "" {
 		return resolveInject(lang, images, commands)
 	}
-	if lang := languageFromLabels(pod.Labels); lang != "" {
-		return lang
+	if lang := normalizeDetectLang(languageFromLabels(pod.Labels)); lang != "" {
+		return resolveInject(lang, images, commands)
+	}
+	if lang := languageFromContainers(apps); lang != "" {
+		return resolveInject(lang, images, commands)
+	}
+	if lang := languageFromPodName(pod.Name); lang != "" {
+		return resolveInject(lang, images, commands)
+	}
+	if lang := languageFromLabels(pod.Labels); lang == "" {
+		// also try common name-ish labels as weak hints
+		if pod.Labels != nil {
+			for _, key := range []string{"app.kubernetes.io/name", "app.kubernetes.io/component", "app"} {
+				if lang := languageFromPodName(pod.Labels[key]); lang != "" {
+					return resolveInject(lang, images, commands)
+				}
+			}
+		}
 	}
 	return resolveInject("", images, commands)
 }
 
 func languageFromAnnotations(annotations map[string]string) string {
-	for key, value := range annotations {
-		if strings.Contains(key, "inject-java") && value != "" {
-			return "java"
-		}
-		if strings.Contains(key, "inject-nodejs") && value != "" {
-			return "nodejs"
-		}
-		if strings.Contains(key, "inject-python") && value != "" {
-			return "python"
-		}
-		if strings.Contains(key, "inject-dotnet") && value != "" {
-			return "dotnet"
-		}
-		if strings.Contains(key, "inject-php") && value != "" {
-			return "php"
-		}
-		if strings.Contains(key, "inject-go") && value != "" {
-			return "go"
-		}
-		if strings.Contains(key, "inject-nginx") && value != "" {
-			return "nginx"
-		}
-		if strings.Contains(key, "inject-apache-httpd") && value != "" {
-			return "apache-httpd"
-		}
-		if strings.Contains(key, "inject-ruby") && value != "" {
-			return "ruby"
-		}
-		if strings.Contains(key, "inject-sdk") && value != "" && value != "false" {
-			return "sdk"
+	if annotations == nil {
+		return ""
+	}
+	// Prefer more specific inject keys over inject-sdk.
+	order := []struct {
+		suffix string
+		lang   string
+	}{
+		{"inject-java", "java"},
+		{"inject-nodejs", "nodejs"},
+		{"inject-python", "python"},
+		{"inject-dotnet", "dotnet"},
+		{"inject-go", "go"},
+		{"inject-nginx", "nginx"},
+		{"inject-apache-httpd", "apache-httpd"},
+		{"inject-php", "php"},
+		{"inject-ruby", "ruby"},
+		{"inject-sdk", "sdk"},
+	}
+	for _, item := range order {
+		for key, value := range annotations {
+			if value == "" || value == "false" {
+				continue
+			}
+			if strings.Contains(key, item.suffix) {
+				return item.lang
+			}
 		}
 	}
 	return ""
@@ -63,81 +89,177 @@ func languageFromLabels(labels map[string]string) string {
 		"app.kubernetes.io/language",
 		"tags.datadoghq.com/language",
 		"instrumentation.opentelemetry.io/container-language",
+		"tags.datadoghq.com/env", // not language — skip below via normalize
 	} {
+		if key == "tags.datadoghq.com/env" {
+			continue
+		}
 		if val := strings.TrimSpace(labels[key]); val != "" {
 			return val
 		}
 	}
-	if val, ok := labels["app"]; ok {
-		lowerVal := strings.ToLower(val)
-		if strings.Contains(lowerVal, "java") {
-			return "java"
+	return ""
+}
+
+func normalizeDetectLang(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
+	}
+	switch injectCanon(raw) {
+	case "java", "nodejs", "python", "dotnet", "go", "nginx", "apache-httpd", "php", "ruby", "sdk", "rails":
+		if injectCanon(raw) == "rails" {
+			return "ruby"
 		}
-		if strings.Contains(lowerVal, "node") {
+		return injectCanon(raw)
+	}
+	// Loose label values: "spring", "jvm", "express", …
+	switch {
+	case containsAny(raw, "java", "jvm", "spring", "kotlin", "scala", "quarkus", "micronaut"):
+		return "java"
+	case containsAny(raw, "node", "javascript", "typescript", "express", "nestjs", "next"):
+		return "nodejs"
+	case containsAny(raw, "python", "django", "flask", "fastapi", "uvicorn", "gunicorn"):
+		return "python"
+	case containsAny(raw, "dotnet", ".net", "csharp", "aspnet"):
+		return "dotnet"
+	case containsAny(raw, "golang", "go"):
+		// avoid matching "mongo", "logo", etc. — require word-ish go
+		if raw == "go" || raw == "golang" || strings.HasPrefix(raw, "go-") || strings.HasSuffix(raw, "-go") || strings.Contains(raw, "golang") {
+			return "go"
+		}
+	case containsAny(raw, "nginx", "openresty"):
+		return "nginx"
+	case containsAny(raw, "apache", "httpd"):
+		return "apache-httpd"
+	case containsAny(raw, "php", "laravel", "wordpress"):
+		return "php"
+	case containsAny(raw, "ruby", "rails", "puma"):
+		return "ruby"
+	}
+	return ""
+}
+
+// languageFromContainers scores app containers; command beats env beats image.
+func languageFromContainers(containers []corev1.Container) string {
+	bestLang := ""
+	bestScore := 0
+	for _, c := range containers {
+		if lang, score := scoreContainerLanguage(c); score > bestScore {
+			bestLang, bestScore = lang, score
+		}
+	}
+	return bestLang
+}
+
+func scoreContainerLanguage(c corev1.Container) (string, int) {
+	if lang := languageFromCommand(c); lang != "" {
+		return lang, 300
+	}
+	if lang := languageFromEnv(c.Env); lang != "" {
+		return lang, 200
+	}
+	if lang := languageFromImage(c.Image); lang != "" {
+		score := 100
+		// Prefer containers that look like the main app.
+		name := strings.ToLower(c.Name)
+		if containsAny(name, "app", "api", "backend", "server", "web", "svc", "service", "main", "worker") {
+			score += 20
+		}
+		return lang, score
+	}
+	return "", 0
+}
+
+func languageFromEnv(env []corev1.EnvVar) string {
+	for _, e := range env {
+		name := strings.ToUpper(e.Name)
+		switch {
+		case name == "JAVA_TOOL_OPTIONS", name == "JAVA_HOME", strings.HasPrefix(name, "JDK_"),
+			strings.HasPrefix(name, "JAVA_"), name == "SPRING_PROFILES_ACTIVE", name == "CATALINA_HOME":
+			return "java"
+		case name == "NODE_ENV", name == "NODE_OPTIONS", strings.HasPrefix(name, "npm_"), name == "NPM_CONFIG_LOGLEVEL":
 			return "nodejs"
+		case name == "PYTHONPATH", name == "PYTHONUNBUFFERED", name == "UVICORN_HOST", name == "GUNICORN_CMD_ARGS",
+			name == "DJANGO_SETTINGS_MODULE", name == "FLASK_APP", strings.HasPrefix(name, "PYTHON_"):
+			return "python"
+		case strings.HasPrefix(name, "ASPNETCORE_"), strings.HasPrefix(name, "DOTNET_"), name == "DOTNET_ROOT":
+			return "dotnet"
+		case name == "PHP_INI_SCAN_DIR", strings.HasPrefix(name, "PHP_"), name == "APP_ENV" && looksPHPEnv(env):
+			if name != "APP_ENV" {
+				return "php"
+			}
+		case name == "RAILS_ENV", name == "RACK_ENV", name == "BUNDLE_PATH", name == "BUNDLE_APP_CONFIG",
+			strings.HasPrefix(name, "RUBY"):
+			return "ruby"
+		case name == "GOPATH", name == "GOROOT", name == "CGO_ENABLED":
+			return "go"
+		case name == "NGINX_ENTRYPOINT_QUIET_LOGS", name == "NGINX_VERSION":
+			return "nginx"
 		}
 	}
 	return ""
 }
 
-func languageFromContainers(pod *corev1.Pod) string {
-	for _, c := range pod.Spec.Containers {
-		if lang := languageFromImage(c.Image); lang != "" {
-			return lang
-		}
-		if lang := languageFromCommand(c); lang != "" {
-			return lang
-		}
-		for _, env := range c.Env {
-			name := strings.ToUpper(env.Name)
-			if strings.Contains(name, "JAVA_") || strings.Contains(name, "JDK_") || name == "JAVA_TOOL_OPTIONS" {
-				return "java"
-			}
-			if name == "NODE_ENV" || strings.HasPrefix(name, "NODE_") {
-				return "nodejs"
-			}
-			if name == "PYTHONPATH" || strings.HasPrefix(name, "PYTHON_") || name == "UVICORN_HOST" {
-				return "python"
-			}
-			if strings.Contains(name, "PHP_") || name == "PHP_INI_SCAN_DIR" {
-				return "php"
-			}
-			if strings.Contains(name, "RUBY") || name == "BUNDLE_PATH" || name == "RAILS_ENV" {
-				return "ruby"
-			}
-			if strings.Contains(name, "DOTNET_") || strings.Contains(name, "ASPNETCORE_") {
-				return "dotnet"
-			}
-			if strings.Contains(name, "GOPATH") || strings.Contains(name, "GOROOT") {
-				return "go"
-			}
+func looksPHPEnv(env []corev1.EnvVar) bool {
+	for _, e := range env {
+		n := strings.ToUpper(e.Name)
+		if strings.HasPrefix(n, "PHP_") || n == "LARAVEL_ENV" {
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
 func languageFromImage(image string) string {
 	img := strings.ToLower(image)
+	// Strip digest/tag noise for matching repo name.
+	repo := img
+	if i := strings.LastIndex(repo, "@"); i >= 0 {
+		repo = repo[:i]
+	}
+	if i := strings.LastIndex(repo, ":"); i >= 0 {
+		// keep path before tag, but only if tag doesn't look like a port
+		after := repo[i+1:]
+		if !strings.Contains(after, "/") {
+			repo = repo[:i]
+		}
+	}
+	base := path.Base(repo)
+
 	switch {
-	case containsAny(img, "openjdk", "eclipse-temurin", "temurin", "amazoncorretto", "corretto", "microsoft-openjdk", "ibm-semeru", "liberica", "sapmachine", "graalvm", "distroless/java", "tomcat", "wildfly", "jre", "jdk", "maven", "spring-boot"):
+	case containsAny(img, "openjdk", "eclipse-temurin", "temurin", "amazoncorretto", "corretto",
+		"microsoft-openjdk", "ibm-semeru", "liberica", "sapmachine", "graalvm", "distroless/java",
+		"tomcat", "wildfly", "jboss", "payara", "weblogic", "spring-boot", "maven", "gradle",
+		"/jre", "/jdk", "jre-", "jdk-"):
 		return "java"
-	case containsAny(img, "node:", "node@", "/node", "nodejs", "npm", "pm2", "distroless/nodejs"):
+	case containsAny(img, "node:", "nodejs", "distroless/nodejs", "/node@", "bitnami/node", "oven/bun"):
+		// bun often runs JS — map to nodejs inject
 		return "nodejs"
-	case containsAny(img, "python", "gunicorn", "uvicorn", "flask", "django", "distroless/python"):
+	case base == "node" || strings.HasPrefix(base, "node-"):
+		return "nodejs"
+	case containsAny(img, "python", "gunicorn", "uvicorn", "flask", "django", "distroless/python", "bitnami/python", "pypy"):
 		return "python"
-	case containsAny(img, "php-fpm", "php:", "/php", "wordpress", "laravel"):
+	case base == "python" || strings.HasPrefix(base, "python"):
+		return "python"
+	case containsAny(img, "php-fpm", "wordpress", "laravel", "bitnami/php", "php:"):
 		return "php"
-	case containsAny(img, "ruby", "rails", "puma"):
+	case base == "php" || strings.HasPrefix(base, "php"):
+		return "php"
+	case containsAny(img, "ruby", "rails", "puma", "bitnami/ruby"):
 		return "ruby"
-	case containsAny(img, "dotnet", "aspnet", "microsoft-dotnet"):
+	case containsAny(img, "dotnet", "aspnet", "microsoft-dotnet", "mcr.microsoft.com/dotnet"):
 		return "dotnet"
-	case containsAny(img, "nginx", "openresty"):
+	case containsAny(img, "nginx", "openresty", "bitnami/nginx"):
 		return "nginx"
-	case strings.Contains(img, "httpd") || strings.Contains(img, "apache2"):
+	case containsAny(img, "httpd", "apache2", "bitnami/apache"):
 		return "apache-httpd"
-	case containsAny(img, "golang", "/go:", "/go@", "distroless/static", "distroless/base"):
-		// distroless/static|base is commonly Go scratch; still a heuristic.
-		if strings.Contains(img, "golang") || strings.Contains(img, "/go:") || strings.Contains(img, "/go@") || strings.HasPrefix(img, "go:") {
+	case containsAny(img, "golang", "distroless/static", "distroless/base", "scratch"):
+		if containsAny(img, "golang", "/go:", "/go@", "library/golang") || base == "go" || strings.HasPrefix(base, "go-") {
+			return "go"
+		}
+		// bare distroless/static is often Go — weak signal, still useful
+		if containsAny(img, "distroless/static", "gcr.io/distroless/static", "gcr.io/distroless/base") {
 			return "go"
 		}
 	}
@@ -146,28 +268,135 @@ func languageFromImage(image string) string {
 
 func languageFromCommand(c corev1.Container) string {
 	parts := append(append([]string{}, c.Command...), c.Args...)
+	joined := strings.ToLower(strings.Join(parts, " "))
+
+	// Shell wrappers: look deeper into -c scripts.
+	for i, part := range parts {
+		base := strings.ToLower(filepathBase(part))
+		if (base == "sh" || base == "bash" || base == "ash" || base == "dash") && i+1 < len(parts) {
+			// common: sh -c "java -jar ..."
+			for j := i + 1; j < len(parts); j++ {
+				if parts[j] == "-c" && j+1 < len(parts) {
+					return languageFromScript(parts[j+1])
+				}
+			}
+		}
+	}
+
 	for _, part := range parts {
 		base := strings.ToLower(filepathBase(part))
 		switch {
-		case base == "java" || strings.HasSuffix(base, ".jar"):
+		case base == "java" || strings.HasSuffix(base, ".jar") || base == "jsvc":
 			return "java"
-		case base == "node" || strings.HasSuffix(base, ".js"):
+		case base == "node" || base == "nodejs" || base == "npm" || base == "npx" || base == "yarn" || base == "pnpm" || base == "bun" ||
+			strings.HasSuffix(base, ".js") || strings.HasSuffix(base, ".mjs") || strings.HasSuffix(base, ".cjs") || strings.HasSuffix(base, ".ts"):
 			return "nodejs"
-		case base == "python" || base == "python3" || base == "gunicorn" || base == "uvicorn":
+		case base == "python" || base == "python3" || base == "python2" || base == "gunicorn" || base == "uvicorn" ||
+			base == "uwsgi" || strings.HasSuffix(base, ".py"):
 			return "python"
-		case base == "php" || base == "php-fpm":
+		case base == "php" || base == "php-fpm" || base == "php-fpm8" || base == "php-fpm7":
 			return "php"
-		case base == "ruby" || base == "bundle" || base == "puma" || base == "rails":
+		case base == "ruby" || base == "bundle" || base == "puma" || base == "rails" || base == "rackup":
 			return "ruby"
 		case base == "dotnet":
 			return "dotnet"
-		case base == "nginx":
+		case base == "nginx" || base == "nginx-debug" || base == "openresty":
 			return "nginx"
-		case base == "httpd" || base == "apache2":
+		case base == "httpd" || base == "apache2" || base == "apachectl":
 			return "apache-httpd"
 		}
 	}
+
+	if lang := languageFromScript(joined); lang != "" {
+		return lang
+	}
+	// Absolute path to a non-script binary is a weak Go signal — only when the
+	// image also looks like distroless/scratch/static (common Go packaging).
+	img := strings.ToLower(c.Image)
+	if containsAny(img, "distroless/static", "distroless/base", "scratch", "golang") {
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" || strings.HasPrefix(part, "-") {
+				continue
+			}
+			base := filepathBase(part)
+			lower := strings.ToLower(base)
+			if wrappers[lower] || wrappers[part] {
+				continue
+			}
+			if strings.HasPrefix(part, "/") && !strings.Contains(lower, ".") && !looksScript(lower) && !genericProcessName(lower) {
+				return "go"
+			}
+		}
+	}
 	return ""
+}
+
+func languageFromScript(script string) string {
+	s := strings.ToLower(script)
+	switch {
+	case containsAny(s, "java -jar", "java ", "/java ", "spring-boot"):
+		return "java"
+	case containsAny(s, "node ", "nodejs ", "npm ", "npx ", "yarn ", "pnpm ", "next start", "nest start"):
+		return "nodejs"
+	case containsAny(s, "python3", "python ", "gunicorn", "uvicorn", "uwsgi"):
+		return "python"
+	case containsAny(s, "php-fpm", "php ", "artisan"):
+		return "php"
+	case containsAny(s, "puma", "rails ", "bundle exec", "rackup"):
+		return "ruby"
+	case containsAny(s, "dotnet "):
+		return "dotnet"
+	case containsAny(s, "nginx", "openresty"):
+		return "nginx"
+	case containsAny(s, "httpd", "apache2", "apachectl"):
+		return "apache-httpd"
+	}
+	return ""
+}
+
+func looksScript(base string) bool {
+	return strings.HasSuffix(base, ".sh") || strings.HasSuffix(base, ".bash") ||
+		strings.HasSuffix(base, ".py") || strings.HasSuffix(base, ".js") ||
+		strings.HasSuffix(base, ".rb") || strings.HasSuffix(base, ".pl")
+}
+
+var wrappers = map[string]bool{
+	"sh": true, "bash": true, "ash": true, "dash": true, "busybox": true,
+	"/bin/sh": true, "/bin/bash": true, "/bin/ash": true, "/usr/bin/env": true, "env": true,
+	"entrypoint.sh": true, "docker-entrypoint.sh": true, "dumb-init": true, "tini": true,
+}
+
+func appContainers(containers []corev1.Container) []corev1.Container {
+	out := make([]corev1.Container, 0, len(containers))
+	for _, c := range containers {
+		if isSidecarContainer(c.Name, c.Image) {
+			continue
+		}
+		out = append(out, c)
+	}
+	if len(out) == 0 {
+		return containers
+	}
+	return out
+}
+
+func isSidecarContainer(name, image string) bool {
+	n := strings.ToLower(name)
+	img := strings.ToLower(image)
+	sidecars := []string{
+		"istio-proxy", "istio-init", "vault-agent", "vault", "linkerd-proxy", "linkerd-init",
+		"consul-sidecar", "consul-connect", "datadog-agent", "dsd-client", "fluent-bit", "fluentd",
+		"filebeat", "logstash", "cloudsql-proxy", "cloud-sql-proxy", "alloy", "grafana-agent",
+		"otel-collector", "opentelemetry-collector", "jaeger-agent", "promtail", "vector",
+		"aws-otel", "k8s-sidecar", "config-reloader", "istio-validation",
+	}
+	for _, s := range sidecars {
+		if n == s || strings.HasPrefix(n, s+"-") || strings.Contains(img, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsAny(s string, needles ...string) bool {
@@ -188,23 +417,29 @@ func filepathBase(value string) string {
 }
 
 func languageFromPodName(name string) string {
-	podName := strings.ToLower(name)
-	if strings.Contains(podName, "java") {
+	podName := strings.ToLower(strings.TrimSpace(name))
+	if podName == "" {
+		return ""
+	}
+	switch {
+	case containsAny(podName, "java", "jvm", "spring", "tomcat", "quarkus"):
 		return "java"
-	}
-	if strings.Contains(podName, "node") {
+	case containsAny(podName, "nodejs", "node-", "-node", "express", "nestjs"):
 		return "nodejs"
-	}
-	if strings.Contains(podName, "python") {
+	case containsAny(podName, "python", "django", "flask", "fastapi"):
 		return "python"
-	}
-	if strings.Contains(podName, "php") {
+	case containsAny(podName, "dotnet", "aspnet"):
+		return "dotnet"
+	case containsAny(podName, "php", "laravel", "wordpress"):
 		return "php"
-	}
-	if strings.Contains(podName, "ruby") || strings.Contains(podName, "rails") {
+	case containsAny(podName, "ruby", "rails"):
 		return "ruby"
-	}
-	if strings.Contains(podName, "golang") || strings.HasPrefix(podName, "go-") || strings.Contains(podName, "-go-") {
+	case containsAny(podName, "nginx", "openresty"):
+		return "nginx"
+	case containsAny(podName, "httpd", "apache"):
+		return "apache-httpd"
+	case podName == "go" || strings.HasPrefix(podName, "go-") || strings.Contains(podName, "-go-") ||
+		strings.HasSuffix(podName, "-go") || strings.Contains(podName, "golang"):
 		return "go"
 	}
 	return ""

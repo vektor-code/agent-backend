@@ -60,3 +60,133 @@ func TestInjectSDKAnnotationDoesNotUseCRName(t *testing.T) {
 		t.Fatalf("detectLanguageFromPodSpec() = %q, want sdk", got)
 	}
 }
+
+func TestDetectIgnoresIstioSidecar(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "istio-proxy", Image: "docker.io/istio/proxyv2:1.20.0"},
+				{Name: "api", Image: "my.registry/payments:1.2.3", Command: []string{"java", "-jar", "/app.jar"}},
+			},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "java" {
+		t.Fatalf("got %q, want java (ignore istio)", got)
+	}
+}
+
+func TestDetectPythonFromCommand(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "web",
+				Image:   "ubuntu:22.04",
+				Command: []string{"uvicorn", "main:app", "--host", "0.0.0.0"},
+			}},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "python" {
+		t.Fatalf("got %q, want python", got)
+	}
+}
+
+func TestDetectNodeFromEnv(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "svc",
+				Image: "ubuntu:22.04",
+				Env:   []corev1.EnvVar{{Name: "NODE_ENV", Value: "production"}},
+			}},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "nodejs" {
+		t.Fatalf("got %q, want nodejs", got)
+	}
+}
+
+func TestDetectShellWrappedJava(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Image:   "custom/app:latest",
+				Command: []string{"/bin/sh", "-c", "java -jar /opt/app.jar"},
+			}},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "java" {
+		t.Fatalf("got %q, want java", got)
+	}
+}
+
+func TestDetectGoDistroless(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Image:   "gcr.io/distroless/static:nonroot",
+				Command: []string{"/payments"},
+			}},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "go" {
+		t.Fatalf("got %q, want go", got)
+	}
+}
+
+func TestDetectLabelJavascriptNormalized(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{"app.kubernetes.io/language": "TypeScript"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Image: "custom/app:1"}},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "nodejs" {
+		t.Fatalf("got %q, want nodejs", got)
+	}
+}
+
+func TestDetectDotnetImage(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Image: "mcr.microsoft.com/dotnet/aspnet:8.0",
+			}},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "dotnet" {
+		t.Fatalf("got %q, want dotnet", got)
+	}
+}
+
+func TestSPALabeledNodeButRunsNginx(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{"language": "nodejs"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Image:   "nginx:1.27-alpine",
+				Command: []string{"nginx", "-g", "daemon off;"},
+			}},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "nginx" {
+		t.Fatalf("got %q, want nginx for SPA", got)
+	}
+}
+
+func TestCommandBeatsWrongImage(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Image:   "alpine:3.19",
+				Command: []string{"node", "server.js"},
+			}},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "nodejs" {
+		t.Fatalf("got %q, want nodejs", got)
+	}
+}
