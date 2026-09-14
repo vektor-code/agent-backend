@@ -16,8 +16,8 @@ func TestGuessGoTargetExeFromContainerName(t *testing.T) {
 		},
 	}
 
-	if got := guessGoTargetExe(template); got != "/reverse-proxy" {
-		t.Fatalf("guessGoTargetExe() = %q, want /reverse-proxy", got)
+	if got := guessGoTargetExe(template); got != "/app/reverse-proxy" {
+		t.Fatalf("guessGoTargetExe() = %q, want /app/reverse-proxy", got)
 	}
 }
 

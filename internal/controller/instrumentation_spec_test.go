@@ -39,12 +39,23 @@ func TestBuildInstrumentationObjectUsesFastExportAndHTTPForDotnet(t *testing.T) 
 	if sec["privileged"] != true {
 		t.Fatalf("go sidecar should be privileged for eBPF")
 	}
+	if sec["runAsUser"] != int64(0) {
+		t.Fatalf("go sidecar runAsUser = %#v, want 0", sec["runAsUser"])
+	}
 	goEnv := goSpec["env"].([]interface{})
 	if got := envValue(goEnv, "OTEL_EXPORTER_OTLP_PROTOCOL"); got != "http/protobuf" {
 		t.Fatalf("go protocol = %q, want http/protobuf (operator/Go auto-instr default)", got)
 	}
+	if got := envValue(goEnv, "OTEL_GO_AUTO_GLOBAL"); got != "true" {
+		t.Fatalf("OTEL_GO_AUTO_GLOBAL = %q, want true", got)
+	}
 	if got := envValue(goEnv, "OTEL_EXPORTER_OTLP_ENDPOINT"); got != "http://agent-backend.crnet-apm.svc.cluster.local:4318" {
 		t.Fatalf("go endpoint = %q, want HTTP :4318", got)
+	}
+	compat := buildCompatibleInstrumentationObject("troni-dev", "crnet-apm")["spec"].(map[string]interface{})
+	compatGo := compat["go"].(map[string]interface{})
+	if _, ok := compatGo["securityContext"]; ok {
+		t.Fatal("compatible go spec must omit securityContext for older CRDs")
 	}
 	if _, ok := spec["apacheHttpd"]; !ok {
 		t.Fatal("expected apacheHttpd spec like nginx (OTel operator)")

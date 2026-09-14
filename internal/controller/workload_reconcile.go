@@ -207,12 +207,20 @@ func guessGoTargetExe(template *corev1.PodTemplateSpec) string {
 	if template == nil || len(template.Spec.Containers) == 0 {
 		return "/app"
 	}
+	// Go eBPF inject only instruments the first non-sidecar-looking container.
 	c := template.Spec.Containers[0]
+	for _, cand := range template.Spec.Containers {
+		if !isSidecarContainer(cand.Name, cand.Image) {
+			c = cand
+			break
+		}
+	}
 	if path := firstProcessPath(append(append([]string{}, c.Command...), c.Args...)); path != "" {
 		return path
 	}
 	if name := executableName(c.Name); name != "" && !genericProcessName(name) {
-		return "/" + name
+		// Prefer /app/<name> (common scratch/distroless layout) over bare /name.
+		return "/app/" + name
 	}
 	imageName := c.Image
 	if slash := strings.LastIndex(imageName, "/"); slash >= 0 {
@@ -225,7 +233,7 @@ func guessGoTargetExe(template *corev1.PodTemplateSpec) string {
 		imageName = imageName[:at]
 	}
 	if name := executableName(imageName); name != "" && !genericProcessName(name) {
-		return "/" + name
+		return "/app/" + name
 	}
 	return "/app"
 }
