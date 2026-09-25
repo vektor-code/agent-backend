@@ -75,6 +75,11 @@ func Run(ctx context.Context, centralURL string, client *http.Client, allowed fu
 				log.Printf("[controller] error syncing configurations: %v", err)
 				continue
 			}
+			for i := range workloads {
+				if !enabledMap[workloads[i].Namespace] {
+					workloads[i].Enabled = false
+				}
+			}
 			for _, raw := range jobs {
 				runner.HandleRaw(ctx, raw)
 			}

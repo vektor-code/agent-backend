@@ -135,6 +135,8 @@ func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w w
 	var containers []map[string]interface{}
 	if w.Enabled && (lang == "sdk" || origLang == "php" || origLang == "ruby" || origLang == "rails") {
 		containers = otelLibraryEnvPatch(template, origLang, w.WorkloadName)
+	} else if !w.Enabled {
+		containers = clearOTelEnvPatch(template)
 	}
 
 	if len(patch) == 0 && len(containers) == 0 {
@@ -156,6 +158,11 @@ func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w w
 		return
 	}
 
+	patchType := types.MergePatchType
+	if !w.Enabled && len(containers) > 0 {
+		patchType = types.StrategicMergePatchType
+	}
+
 	kind := w.WorkloadKind
 	if kind == "" {
 		kind = "Deployment"
@@ -163,11 +170,11 @@ func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w w
 	var perr error
 	switch kind {
 	case "StatefulSet":
-		_, perr = kube.AppsV1().StatefulSets(w.Namespace).Patch(ctx, w.WorkloadName, types.MergePatchType, body, metav1.PatchOptions{})
+		_, perr = kube.AppsV1().StatefulSets(w.Namespace).Patch(ctx, w.WorkloadName, patchType, body, metav1.PatchOptions{})
 	case "DaemonSet":
-		_, perr = kube.AppsV1().DaemonSets(w.Namespace).Patch(ctx, w.WorkloadName, types.MergePatchType, body, metav1.PatchOptions{})
+		_, perr = kube.AppsV1().DaemonSets(w.Namespace).Patch(ctx, w.WorkloadName, patchType, body, metav1.PatchOptions{})
 	default:
-		_, perr = kube.AppsV1().Deployments(w.Namespace).Patch(ctx, w.WorkloadName, types.MergePatchType, body, metav1.PatchOptions{})
+		_, perr = kube.AppsV1().Deployments(w.Namespace).Patch(ctx, w.WorkloadName, patchType, body, metav1.PatchOptions{})
 	}
 	if perr != nil {
 		log.Printf("[controller/workload/error] patch %s %s/%s: %v", kind, w.Namespace, w.WorkloadName, perr)
@@ -278,6 +285,36 @@ func genericProcessName(name string) bool {
 		return true
 	}
 	return false
+}
+
+// clearOTelEnvPatch returns strategic-merge container patches that delete every
+// OTEL_* env var present on the live pod template.
+func clearOTelEnvPatch(template *corev1.PodTemplateSpec) []map[string]interface{} {
+	if template == nil || len(template.Spec.Containers) == 0 {
+		return nil
+	}
+	out := make([]map[string]interface{}, 0, len(template.Spec.Containers))
+	for _, c := range template.Spec.Containers {
+		var envDeletes []map[string]interface{}
+		for _, e := range c.Env {
+			if strings.HasPrefix(e.Name, "OTEL_") {
+				envDeletes = append(envDeletes, map[string]interface{}{
+					"name":   e.Name,
+					"$patch": "delete",
+				})
+			}
+		}
+		if len(envDeletes) > 0 {
+			out = append(out, map[string]interface{}{
+				"name": c.Name,
+				"env":  envDeletes,
+			})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func otelLibraryEnvPatch(template *corev1.PodTemplateSpec, lang, workloadName string) []map[string]interface{} {
