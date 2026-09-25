@@ -24,6 +24,10 @@ type ReportedWorkload struct {
 	Ready        int32  `json:"ready"`
 	Language     string `json:"language"`
 	Instrumented bool   `json:"instrumented"`
+	// StatusReason / StatusMessage roll up the worst non-ready pod hint so
+	// Admin can explain ImagePull / CrashLoop without listing every pod.
+	StatusReason  string `json:"statusReason,omitempty"`
+	StatusMessage string `json:"statusMessage,omitempty"`
 }
 
 // discoverReportedWorkloads lists the instrumentable workload kinds in each app
@@ -97,10 +101,9 @@ func reportedWorkloadFromDaemonSet(d *appsv1.DaemonSet, namespace string) Report
 	}
 }
 
-// enrichWorkloadLanguages copies language and instrumentation state from the
-// pods the agent already probed (process cache included) onto their owning
-// workload, so central does not have to re-detect from a pod template it
-// cannot see.
+// enrichWorkloadLanguages copies language, instrumentation, and non-ready
+// status hints from probed pods onto their owning workload, so central does
+// not have to re-detect from a pod template it cannot see.
 func enrichWorkloadLanguages(workloads []ReportedWorkload, pods []ReportedPod) []ReportedWorkload {
 	if len(workloads) == 0 || len(pods) == 0 {
 		return workloads
@@ -117,6 +120,11 @@ func enrichWorkloadLanguages(workloads []ReportedWorkload, pods []ReportedPod) [
 			}
 			if p.Instrumented {
 				w.Instrumented = true
+			}
+			if w.Ready < w.Replicas && p.StatusReason != "" {
+				w.StatusReason, w.StatusMessage = pickWorstStatus(
+					w.StatusReason, w.StatusMessage, p.StatusReason, p.StatusMessage,
+				)
 			}
 		}
 	}

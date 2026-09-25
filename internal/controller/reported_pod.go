@@ -16,6 +16,10 @@ type ReportedPod struct {
 	MemoryLimit         float64           `json:"memoryLimit"`
 	RestartCount        int               `json:"restartCount"`
 	Ready               bool              `json:"ready"`
+	// StatusReason / StatusMessage explain why Ready is false (ImagePullBackOff,
+	// CrashLoopBackOff, …). Empty when the pod is Ready.
+	StatusReason        string            `json:"statusReason,omitempty"`
+	StatusMessage       string            `json:"statusMessage,omitempty"`
 	Language            string            `json:"language"`
 	Instrumented        bool              `json:"instrumented"`
 	InstrumentationType string            `json:"instrumentationType"`
@@ -56,6 +60,7 @@ func reportedPodFromK8sPod(
 	dbName, dbHost, dbPort := detectDatabaseInfo(pod, configMapData)
 	cpuLimit, memoryLimit := resourceLimitsForPod(pod)
 	usage, measured := podMetrics.usage[pod.Namespace+"/"+pod.Name]
+	statusReason, statusMessage := podStatusHint(pod)
 
 	return ReportedPod{
 		Name:                pod.Name,
@@ -70,6 +75,8 @@ func reportedPodFromK8sPod(
 		MetricsAvailable:    measured && podMetrics.available,
 		RestartCount:        restartCount(pod),
 		Ready:               podReady(pod),
+		StatusReason:        statusReason,
+		StatusMessage:       statusMessage,
 		Language:            lang,
 		Instrumented:        inst,
 		InstrumentationType: instType,
