@@ -76,6 +76,23 @@ func TestEnrichWorkloadLanguagesCopiesFromOwnedPods(t *testing.T) {
 	}
 }
 
+func TestEnrichWorkloadLanguagesFallsBackToProcessCache(t *testing.T) {
+	processLangByWorkload.store("sha256:test", []string{"dev/api"}, "java -jar app.jar", "java")
+	t.Cleanup(func() {
+		processLangByWorkload.mu.Lock()
+		processLangByWorkload.byWorkload = make(map[string]string)
+		processLangByWorkload.mu.Unlock()
+	})
+
+	workloads := []ReportedWorkload{
+		{Name: "api", Namespace: "dev", Kind: "Deployment", Replicas: 1, Ready: 1},
+	}
+	got := enrichWorkloadLanguages(workloads, nil)
+	if got[0].Language != "java" {
+		t.Fatalf("Language = %q, want java from process cache", got[0].Language)
+	}
+}
+
 func TestEnrichWorkloadLanguagesIgnoresUnrelatedPodNames(t *testing.T) {
 	workloads := []ReportedWorkload{{Name: "api", Namespace: "dev"}}
 	pods := []ReportedPod{{Name: "apiserver-1", Namespace: "dev", Language: "go"}}

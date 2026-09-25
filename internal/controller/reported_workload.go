@@ -105,7 +105,7 @@ func reportedWorkloadFromDaemonSet(d *appsv1.DaemonSet, namespace string) Report
 // status hints from probed pods onto their owning workload, so central does
 // not have to re-detect from a pod template it cannot see.
 func enrichWorkloadLanguages(workloads []ReportedWorkload, pods []ReportedPod) []ReportedWorkload {
-	if len(workloads) == 0 || len(pods) == 0 {
+	if len(workloads) == 0 {
 		return workloads
 	}
 	for i := range workloads {
@@ -126,6 +126,9 @@ func enrichWorkloadLanguages(workloads []ReportedWorkload, pods []ReportedPod) [
 					w.StatusReason, w.StatusMessage, p.StatusReason, p.StatusMessage,
 				)
 			}
+		}
+		if w.Language == "" {
+			w.Language = getProcessLangByWorkload(w.Namespace, w.Name)
 		}
 	}
 	return workloads

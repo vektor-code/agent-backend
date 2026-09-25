@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -55,6 +57,9 @@ func reportedPodFromK8sPod(
 	processCmdline string,
 ) ReportedPod {
 	lang := detectLanguage(pod, processCmdline)
+	if lang == "" {
+		lang = languageFromProcessCache(pod)
+	}
 	isFrontend := isStaticHTTPStack(lang)
 	inst, instType, details := getPodInstrumentationStatus(pod)
 	dbName, dbHost, dbPort := detectDatabaseInfo(pod, configMapData)
@@ -103,6 +108,21 @@ func reportedNodeFromK8sNode(node *corev1.Node, nodeMetrics nodeMetricsSnapshot)
 		MemoryUsage:       usage.MemoryMi,
 		MetricsAvailable:  measured && nodeMetrics.available,
 	}
+}
+
+// languageFromProcessCache fills language from live process probes when the pod
+// template and cmdline passed into reportedPodFromK8sPod did not resolve one.
+func languageFromProcessCache(pod *corev1.Pod) string {
+	for _, wKey := range workloadKeysFromPod(pod) {
+		ns, name, ok := strings.Cut(wKey, "/")
+		if !ok {
+			continue
+		}
+		if lang := getProcessLangByWorkload(ns, name); lang != "" {
+			return lang
+		}
+	}
+	return ""
 }
 
 func nodeRole(labels map[string]string) string {
