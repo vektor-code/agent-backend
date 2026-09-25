@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 const injectPrefix = "instrumentation.opentelemetry.io/inject-"
@@ -48,7 +49,7 @@ func normalizeInjectLang(language string) string {
 // operator injects it, and strips the annotation when disabled. It is idempotent —
 // a workload is only patched when its inject annotation actually needs to change,
 // so steady state never triggers a rollout.
-func reconcileWorkloadInstrumentation(ctx context.Context, kube kubernetes.Interface, workloads []workloadConfig) {
+func reconcileWorkloadInstrumentation(ctx context.Context, kube kubernetes.Interface, restConfig *rest.Config, workloads []workloadConfig) {
 	for _, w := range workloads {
 		if w.Namespace == "" || w.WorkloadName == "" {
 			continue
@@ -90,14 +91,39 @@ func reconcileWorkloadInstrumentation(ctx context.Context, kube kubernetes.Inter
 		if w.Enabled {
 			desiredKey = injectPrefix + lang
 		}
+		template, hasTemplate := getPodTemplate(ctx, kube, w)
+		if hasTemplate && shouldBlockNginxInject(ctx, kube, restConfig, w.Namespace, template, lang, desiredKey) {
+			if _, _, reason := nginxInjectDecision(ctx, kube, restConfig, w.Namespace, template); reason != "" {
+				log.Printf("[controller/workload] block nginx inject %s/%s: %s", w.Namespace, w.WorkloadName, reason)
+			}
+			desiredKey = ""
+			lang = ""
+		}
 		instName := instrumentationName(w.Namespace)
-		patchWorkloadAnnotation(ctx, kube, w, origLang, lang, desiredKey, instName)
+		patchWorkloadAnnotation(ctx, kube, restConfig, w, origLang, lang, desiredKey, instName)
 	}
+}
+
+func shouldBlockNginxInject(ctx context.Context, kube kubernetes.Interface, restConfig *rest.Config, namespace string, template *corev1.PodTemplateSpec, lang, desiredKey string) bool {
+	if desiredKey == injectPrefix+"nginx" || hasNginxInjectAnnotation(template.Annotations) {
+		_, compatible, _ := nginxInjectDecision(ctx, kube, restConfig, namespace, template)
+		return !compatible
+	}
+	if lang == "nginx" {
+		_, compatible, _ := nginxInjectDecision(ctx, kube, restConfig, namespace, template)
+		return !compatible
+	}
+	return false
+}
+
+func nginxInjectDecision(ctx context.Context, kube kubernetes.Interface, restConfig *rest.Config, namespace string, template *corev1.PodTemplateSpec) (version string, compatible bool, blockedReason string) {
+	probed := ResolveNginxVersion(ctx, kube, restConfig, namespace, template)
+	return NginxInjectStatus(template.Spec.Containers, probed)
 }
 
 // patchWorkloadAnnotation ensures the workload's pod template carries exactly the
 // desired inject annotation (or none), removing any stale inject-* keys.
-func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w workloadConfig, origLang, lang, desiredKey, instName string) {
+func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, restConfig *rest.Config, w workloadConfig, origLang, lang, desiredKey, instName string) {
 	template, ok := getPodTemplate(ctx, kube, w)
 	if !ok {
 		return
@@ -113,6 +139,17 @@ func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, w w
 	current := template.Annotations
 	if current == nil {
 		current = map[string]string{}
+	}
+	if desiredKey == injectPrefix+"nginx" || hasNginxInjectAnnotation(current) {
+		if _, compatible, reason := nginxInjectDecision(ctx, kube, restConfig, w.Namespace, template); !compatible {
+			action := "block nginx inject"
+			if hasNginxInjectAnnotation(current) && desiredKey != injectPrefix+"nginx" {
+				action = "strip unsupported nginx inject"
+			}
+			log.Printf("[controller/workload] %s %s/%s: %s", action, w.Namespace, w.WorkloadName, reason)
+			desiredKey = ""
+			lang = ""
+		}
 	}
 
 	patch := map[string]interface{}{}

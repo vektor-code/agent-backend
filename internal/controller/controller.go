@@ -100,7 +100,7 @@ func Run(ctx context.Context, centralURL string, client *http.Client, allowed fu
 			// Apply per-service inject annotations first, then roll namespaces
 			// whose Instrumentation CR was created/toggled so pods are admitted
 			// with the webhook against a live CR.
-			reconcileWorkloadInstrumentation(ctx, clients.kube, workloads)
+			reconcileWorkloadInstrumentation(ctx, clients.kube, clients.config, workloads)
 			seenRestart := map[string]bool{}
 			for _, ns := range restartNamespaces {
 				if ns == "" || seenRestart[ns] {
