@@ -11,9 +11,10 @@ import (
 )
 
 type clusterState struct {
-	appNamespaces []string
-	reportedPods  []ReportedPod
-	reportedNodes []ReportedNode
+	appNamespaces     []string
+	reportedPods      []ReportedPod
+	reportedNodes     []ReportedNode
+	reportedWorkloads []ReportedWorkload
 }
 
 func discoverClusterState(ctx context.Context, clients *controllerClients) (clusterState, error) {
@@ -28,11 +29,16 @@ func discoverClusterState(ctx context.Context, clients *controllerClients) (clus
 	nodeMetrics := fetchNodeMetrics(ctx, clients.kube)
 	reportedPods := discoverReportedPods(ctx, clients, configMapData, podMetrics)
 	reportedNodes := discoverReportedNodes(ctx, clients.kube, nodeMetrics)
+	reportedWorkloads := enrichWorkloadLanguages(
+		discoverReportedWorkloads(ctx, clients.kube, appNamespaces),
+		reportedPods,
+	)
 
 	return clusterState{
-		appNamespaces: appNamespaces,
-		reportedPods:  reportedPods,
-		reportedNodes: reportedNodes,
+		appNamespaces:     appNamespaces,
+		reportedPods:      reportedPods,
+		reportedNodes:     reportedNodes,
+		reportedWorkloads: reportedWorkloads,
 	}, nil
 }
 
