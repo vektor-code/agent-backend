@@ -49,7 +49,7 @@ func Run(ctx context.Context, centralURL string, client *http.Client, allowed fu
 			if allowed != nil && !allowed() {
 				continue
 			}
-			state, err := discoverClusterState(ctx, clients.kube)
+			state, err := discoverClusterState(ctx, clients)
 			if err != nil {
 				log.Printf("[controller] error discovering cluster state: %v", err)
 				continue

@@ -16,18 +16,18 @@ type clusterState struct {
 	reportedNodes []ReportedNode
 }
 
-func discoverClusterState(ctx context.Context, client *kubernetes.Clientset) (clusterState, error) {
-	nsList, err := client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+func discoverClusterState(ctx context.Context, clients *controllerClients) (clusterState, error) {
+	nsList, err := clients.kube.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return clusterState{}, fmt.Errorf("list namespaces: %w", err)
 	}
 
 	appNamespaces := appNamespaceNames(nsList.Items)
-	configMapData := discoverConfigMapData(ctx, client)
-	podMetrics := fetchPodMetrics(ctx, client)
-	nodeMetrics := fetchNodeMetrics(ctx, client)
-	reportedPods := discoverReportedPods(ctx, client, configMapData, podMetrics)
-	reportedNodes := discoverReportedNodes(ctx, client, nodeMetrics)
+	configMapData := discoverConfigMapData(ctx, clients.kube)
+	podMetrics := fetchPodMetrics(ctx, clients.kube)
+	nodeMetrics := fetchNodeMetrics(ctx, clients.kube)
+	reportedPods := discoverReportedPods(ctx, clients, configMapData, podMetrics)
+	reportedNodes := discoverReportedNodes(ctx, clients.kube, nodeMetrics)
 
 	return clusterState{
 		appNamespaces: appNamespaces,
@@ -60,22 +60,29 @@ func discoverConfigMapData(ctx context.Context, client *kubernetes.Clientset) ma
 
 func discoverReportedPods(
 	ctx context.Context,
-	client *kubernetes.Clientset,
+	clients *controllerClients,
 	configMapData map[string]map[string]string,
 	podMetrics metricsSnapshot,
 ) []ReportedPod {
-	podList, err := client.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	podList, err := clients.kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		log.Printf("[controller] error listing pods: %v", err)
 		return nil
 	}
 
-	reportedPods := make([]ReportedPod, 0, len(podList.Items))
+	appPods := make([]corev1.Pod, 0, len(podList.Items))
 	for _, pod := range podList.Items {
-		if !isAppNamespace(pod.Namespace) {
-			continue
+		if isAppNamespace(pod.Namespace) {
+			appPods = append(appPods, pod)
 		}
-		reportedPods = append(reportedPods, reportedPodFromK8sPod(&pod, configMapData, podMetrics))
+	}
+	cmdlines := probeProcessCmdlines(ctx, clients, appPods)
+
+	reportedPods := make([]ReportedPod, 0, len(appPods))
+	for i := range appPods {
+		pod := &appPods[i]
+		cmdline := cmdlines[pod.Namespace+"/"+pod.Name]
+		reportedPods = append(reportedPods, reportedPodFromK8sPod(pod, configMapData, podMetrics, cmdline))
 	}
 	return reportedPods
 }

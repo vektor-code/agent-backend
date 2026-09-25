@@ -70,7 +70,12 @@ func reconcileWorkloadInstrumentation(ctx context.Context, kube kubernetes.Inter
 					},
 					Spec: template.Spec,
 				}
-				if detected := detectLanguageFromPodSpec(pseudo); detected != "" {
+				// Prefer live process cache (Datadog-style); fall back to spec.
+				detected := getProcessLangByWorkload(w.Namespace, w.WorkloadName)
+				if detected == "" {
+					detected = detectLanguageFromPodSpec(pseudo)
+				}
+				if detected != "" {
 					origLang = detected
 					lang = normalizeInjectLang(detected)
 					log.Printf("[controller/workload] auto-detected %s for %s/%s", lang, w.Namespace, w.WorkloadName)

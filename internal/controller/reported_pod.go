@@ -15,6 +15,7 @@ type ReportedPod struct {
 	MemoryUsage         float64           `json:"memoryUsage"`
 	MemoryLimit         float64           `json:"memoryLimit"`
 	RestartCount        int               `json:"restartCount"`
+	Ready               bool              `json:"ready"`
 	Language            string            `json:"language"`
 	Instrumented        bool              `json:"instrumented"`
 	InstrumentationType string            `json:"instrumentationType"`
@@ -47,8 +48,9 @@ func reportedPodFromK8sPod(
 	pod *corev1.Pod,
 	configMapData map[string]map[string]string,
 	podMetrics metricsSnapshot,
+	processCmdline string,
 ) ReportedPod {
-	lang := detectLanguageFromPodSpec(pod)
+	lang := detectLanguage(pod, processCmdline)
 	isFrontend := isStaticHTTPStack(lang)
 	inst, instType, details := getPodInstrumentationStatus(pod)
 	dbName, dbHost, dbPort := detectDatabaseInfo(pod, configMapData)
@@ -67,6 +69,7 @@ func reportedPodFromK8sPod(
 		MemoryLimit:         memoryLimit,
 		MetricsAvailable:    measured && podMetrics.available,
 		RestartCount:        restartCount(pod),
+		Ready:               podReady(pod),
 		Language:            lang,
 		Instrumented:        inst,
 		InstrumentationType: instType,

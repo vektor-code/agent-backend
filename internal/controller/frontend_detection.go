@@ -10,8 +10,7 @@ import (
 // server (nginx/apache). Workload names are ignored — the assigned tech
 // stack (and the container image/command) is the source of truth.
 func isFrontendPod(pod *corev1.Pod, _ map[string]bool, _ []corev1.Service) bool {
-	images, commands := imagesAndCommands(pod.Spec.Containers)
-	return isStaticHTTPStack(resolveInject("", images, commands))
+	return isStaticHTTPStack(detectLanguage(pod, ""))
 }
 
 func isStaticHTTPStack(lang string) bool {
