@@ -99,6 +99,13 @@ func reconcileWorkloadInstrumentation(ctx context.Context, kube kubernetes.Inter
 			desiredKey = ""
 			lang = ""
 		}
+		if hasTemplate && shouldBlockApacheInject(ctx, kube, restConfig, w.Namespace, template, lang, desiredKey) {
+			if _, _, reason := apacheInjectDecision(ctx, kube, restConfig, w.Namespace, template); reason != "" {
+				log.Printf("[controller/workload] block apache inject %s/%s: %s", w.Namespace, w.WorkloadName, reason)
+			}
+			desiredKey = ""
+			lang = ""
+		}
 		instName := instrumentationName(w.Namespace)
 		patchWorkloadAnnotation(ctx, kube, restConfig, w, origLang, lang, desiredKey, instName)
 	}
@@ -119,6 +126,23 @@ func shouldBlockNginxInject(ctx context.Context, kube kubernetes.Interface, rest
 func nginxInjectDecision(ctx context.Context, kube kubernetes.Interface, restConfig *rest.Config, namespace string, template *corev1.PodTemplateSpec) (version string, compatible bool, blockedReason string) {
 	probed := ResolveNginxVersion(ctx, kube, restConfig, namespace, template)
 	return NginxInjectStatus(template.Spec.Containers, probed)
+}
+
+func shouldBlockApacheInject(ctx context.Context, kube kubernetes.Interface, restConfig *rest.Config, namespace string, template *corev1.PodTemplateSpec, lang, desiredKey string) bool {
+	if desiredKey == injectPrefix+"apache-httpd" || hasApacheInjectAnnotation(template.Annotations) {
+		_, compatible, _ := apacheInjectDecision(ctx, kube, restConfig, namespace, template)
+		return !compatible
+	}
+	if lang == "apache-httpd" {
+		_, compatible, _ := apacheInjectDecision(ctx, kube, restConfig, namespace, template)
+		return !compatible
+	}
+	return false
+}
+
+func apacheInjectDecision(ctx context.Context, kube kubernetes.Interface, restConfig *rest.Config, namespace string, template *corev1.PodTemplateSpec) (version string, compatible bool, blockedReason string) {
+	probed := ResolveApacheVersion(ctx, kube, restConfig, namespace, template)
+	return ApacheInjectStatus(template.Spec.Containers, probed)
 }
 
 // patchWorkloadAnnotation ensures the workload's pod template carries exactly the
@@ -145,6 +169,17 @@ func patchWorkloadAnnotation(ctx context.Context, kube kubernetes.Interface, res
 			action := "block nginx inject"
 			if hasNginxInjectAnnotation(current) && desiredKey != injectPrefix+"nginx" {
 				action = "strip unsupported nginx inject"
+			}
+			log.Printf("[controller/workload] %s %s/%s: %s", action, w.Namespace, w.WorkloadName, reason)
+			desiredKey = ""
+			lang = ""
+		}
+	}
+	if desiredKey == injectPrefix+"apache-httpd" || hasApacheInjectAnnotation(current) {
+		if _, compatible, reason := apacheInjectDecision(ctx, kube, restConfig, w.Namespace, template); !compatible {
+			action := "block apache inject"
+			if hasApacheInjectAnnotation(current) && desiredKey != injectPrefix+"apache-httpd" {
+				action = "strip unsupported apache inject"
 			}
 			log.Printf("[controller/workload] %s %s/%s: %s", action, w.Namespace, w.WorkloadName, reason)
 			desiredKey = ""
