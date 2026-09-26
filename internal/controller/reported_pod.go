@@ -54,6 +54,14 @@ type ReportedNode struct {
 	Region            string  `json:"region,omitempty"`
 	Zone              string  `json:"zone,omitempty"`
 	InstanceType      string  `json:"instanceType,omitempty"`
+	// Host facts from node.Status.NodeInfo — used to show Ubuntu/etc on on-prem
+	// and OS/arch even when cloud labels are present.
+	OperatingSystem  string `json:"operatingSystem,omitempty"`
+	OsImage          string `json:"osImage,omitempty"`
+	KernelVersion    string `json:"kernelVersion,omitempty"`
+	Architecture     string `json:"architecture,omitempty"`
+	ContainerRuntime string `json:"containerRuntime,omitempty"`
+	KubeletVersion   string `json:"kubeletVersion,omitempty"`
 }
 
 func reportedPodFromK8sPod(
@@ -102,6 +110,7 @@ func reportedPodFromK8sPod(
 
 func reportedNodeFromK8sNode(node *corev1.Node, nodeMetrics nodeMetricsSnapshot) ReportedNode {
 	usage, measured := nodeMetrics.usage[node.Name]
+	info := node.Status.NodeInfo
 	return ReportedNode{
 		Name:              node.Name,
 		Role:              nodeRole(node.Labels),
@@ -118,7 +127,38 @@ func reportedNodeFromK8sNode(node *corev1.Node, nodeMetrics nodeMetricsSnapshot)
 		Region:            nodeRegion(node.Labels),
 		Zone:              nodeZone(node.Labels),
 		InstanceType:      nodeInstanceType(node.Labels),
+		OperatingSystem:   strings.TrimSpace(info.OperatingSystem),
+		OsImage:           normalizeOsImage(info.OSImage),
+		KernelVersion:     strings.TrimSpace(info.KernelVersion),
+		Architecture:      strings.TrimSpace(info.Architecture),
+		ContainerRuntime:  strings.TrimSpace(info.ContainerRuntimeVersion),
+		KubeletVersion:    strings.TrimSpace(info.KubeletVersion),
 	}
+}
+
+// normalizeOsImage keeps a short human label (e.g. "Ubuntu 22.04.3 LTS") from
+// kubelet OSImage strings that sometimes include long build suffixes.
+func normalizeOsImage(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	// Prefer a friendly distro+version when present in the string.
+	lower := strings.ToLower(s)
+	for _, name := range []string{"ubuntu", "debian", "centos", "rocky", "almalinux", "fedora", "rhel", "red hat", "suse", "amazon linux", "container-optimized os", "flatcar", "bottlerocket"} {
+		if i := strings.Index(lower, name); i >= 0 {
+			rest := strings.TrimSpace(s[i:])
+			// Cap length so the UI popover stays readable.
+			if len(rest) > 64 {
+				rest = strings.TrimSpace(rest[:64])
+			}
+			return rest
+		}
+	}
+	if len(s) > 64 {
+		return strings.TrimSpace(s[:64])
+	}
+	return s
 }
 
 func containerImagesFromPod(pod *corev1.Pod) []string {
@@ -168,21 +208,32 @@ func nodeInstanceType(labels map[string]string) string {
 	return labels["beta.kubernetes.io/instance-type"]
 }
 
-// inferCloudProvider reads well-known node label prefixes; empty when unknown.
+// inferCloudProvider reads well-known node label prefixes; empty means on-prem / unknown.
 func inferCloudProvider(labels map[string]string) string {
 	if labels == nil {
 		return ""
 	}
 	for key := range labels {
 		switch {
-		case strings.HasPrefix(key, "kubernetes.azure.com/"):
+		case strings.HasPrefix(key, "kubernetes.azure.com/"), strings.HasPrefix(key, "azure.workload.identity/"):
 			return "azure"
-		case strings.HasPrefix(key, "eks.amazonaws.com/"), strings.HasPrefix(key, "topology.k8s.aws/"):
+		case strings.HasPrefix(key, "eks.amazonaws.com/"), strings.HasPrefix(key, "topology.k8s.aws/"),
+			strings.HasPrefix(key, "alpha.eksctl.io/"):
 			return "aws"
-		case strings.HasPrefix(key, "cloud.google.com/"):
+		case strings.HasPrefix(key, "cloud.google.com/"), strings.HasPrefix(key, "topology.gke.io/"):
 			return "gcp"
 		case strings.HasPrefix(key, "node.openshift.io/"):
 			return "ocp"
+		case strings.HasPrefix(key, "ibm-cloud.kubernetes.io/"):
+			return "ibm"
+		case strings.HasPrefix(key, "oci.oraclecloud.com/"):
+			return "oci"
+		case strings.HasPrefix(key, "digitalocean.com/"):
+			return "digitalocean"
+		case strings.HasPrefix(key, "linode.com/"):
+			return "linode"
+		case strings.Contains(key, "vsphere"):
+			return "vsphere"
 		}
 	}
 	return ""
