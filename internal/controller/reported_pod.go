@@ -30,6 +30,8 @@ type ReportedPod struct {
 	DatabaseHost        string            `json:"databaseHost"`
 	DatabasePort        string            `json:"databasePort"`
 	IsFrontend          bool              `json:"isFrontend"`
+	// ContainerImages lists app container images (init containers omitted).
+	ContainerImages []string `json:"containerImages,omitempty"`
 	// MetricsAvailable is false when metrics-server did not report this pod.
 	// The dashboard uses it to show "unavailable" rather than a zero that
 	// looks like idleness.
@@ -48,6 +50,10 @@ type ReportedNode struct {
 	CpuUsage          float64 `json:"cpuUsage"`
 	MemoryUsage       float64 `json:"memoryUsage"`
 	MetricsAvailable  bool    `json:"metricsAvailable"`
+	CloudProvider     string  `json:"cloudProvider,omitempty"`
+	Region            string  `json:"region,omitempty"`
+	Zone              string  `json:"zone,omitempty"`
+	InstanceType      string  `json:"instanceType,omitempty"`
 }
 
 func reportedPodFromK8sPod(
@@ -90,6 +96,7 @@ func reportedPodFromK8sPod(
 		DatabaseHost:        dbHost,
 		DatabasePort:        dbPort,
 		IsFrontend:          isFrontend,
+		ContainerImages:     containerImagesFromPod(pod),
 	}
 }
 
@@ -107,7 +114,78 @@ func reportedNodeFromK8sNode(node *corev1.Node, nodeMetrics nodeMetricsSnapshot)
 		CpuUsage:          usage.CPUMilli,
 		MemoryUsage:       usage.MemoryMi,
 		MetricsAvailable:  measured && nodeMetrics.available,
+		CloudProvider:     inferCloudProvider(node.Labels),
+		Region:            nodeRegion(node.Labels),
+		Zone:              nodeZone(node.Labels),
+		InstanceType:      nodeInstanceType(node.Labels),
 	}
+}
+
+func containerImagesFromPod(pod *corev1.Pod) []string {
+	if pod == nil || len(pod.Spec.Containers) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(pod.Spec.Containers))
+	images := make([]string, 0, len(pod.Spec.Containers))
+	for _, c := range pod.Spec.Containers {
+		img := strings.TrimSpace(c.Image)
+		if img == "" || seen[img] {
+			continue
+		}
+		seen[img] = true
+		images = append(images, img)
+	}
+	return images
+}
+
+func nodeZone(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	if z := labels["topology.kubernetes.io/zone"]; z != "" {
+		return z
+	}
+	return labels["failure-domain.beta.kubernetes.io/zone"]
+}
+
+func nodeRegion(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	if r := labels["topology.kubernetes.io/region"]; r != "" {
+		return r
+	}
+	return labels["failure-domain.beta.kubernetes.io/region"]
+}
+
+func nodeInstanceType(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	if t := labels["node.kubernetes.io/instance-type"]; t != "" {
+		return t
+	}
+	return labels["beta.kubernetes.io/instance-type"]
+}
+
+// inferCloudProvider reads well-known node label prefixes; empty when unknown.
+func inferCloudProvider(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	for key := range labels {
+		switch {
+		case strings.HasPrefix(key, "kubernetes.azure.com/"):
+			return "azure"
+		case strings.HasPrefix(key, "eks.amazonaws.com/"), strings.HasPrefix(key, "topology.k8s.aws/"):
+			return "aws"
+		case strings.HasPrefix(key, "cloud.google.com/"):
+			return "gcp"
+		case strings.HasPrefix(key, "node.openshift.io/"):
+			return "ocp"
+		}
+	}
+	return ""
 }
 
 // languageFromProcessCache fills language from live process probes when the pod
